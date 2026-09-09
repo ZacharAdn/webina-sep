@@ -1,0 +1,45 @@
+# --- Secrets — never commit ---
+.env
+.env.*
+!.env.example
+*.key
+*token*.json
+credentials*.json
+keys.txt
+
+# --- macOS / editors ---
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+.idea/
+*.swp
+*~
+
+# --- Claude Code local state ---
+.claude/settings.local.json
+.claude/state/
+
+# --- Build output and dependencies ---
+node_modules/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+
+# --- Python ---
+venv_webina-sep/
+venv*/
+.venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# --- ladder ---
+venv_*/
+__pycache__/
+*.pyc
+.ladder/
+.streamlit/secrets.toml
+data/predictions.csv

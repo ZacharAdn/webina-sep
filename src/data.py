@@ -1,0 +1,154 @@
+"""Rung 1's plumbing -- read records from Supabase, fall back to the CSV.
+
+Two things here are not obvious and both bite in front of an audience:
+
+  1. st_supabase_connection 2.x removed conn.query(...). The Streamlit tutorial
+     still shows it. In 2.1.3 the query surface is conn.table(...), which is the
+     supabase-py builder.
+  2. PostgREST caps a response at 1,000 rows. A dashboard that ignores this
+     silently renders 1,000 of 7,043 rows and every number on the page is wrong.
+     fetch_table pages through with .range() instead.
+
+If Supabase is unreachable -- no secrets, wifi dies mid-demo -- the loader falls
+back to the prepared CSV and says so out loud rather than showing an error.
+"""
+
+from __future__ import annotations
+
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+LOCAL_PREDICTIONS = REPO_ROOT / "data" / "predictions.csv"
+PAGE_SIZE = 1000
+RECORDS_TABLE = "records"
+PREDICTIONS_TABLE = "predictions"
+
+
+def project_name() -> str:
+    with (REPO_ROOT / "ladder.toml").open("rb") as fh:
+        return str(tomllib.load(fh)["project"]["name"])
+
+
+def local_csv() -> Path:
+    return REPO_ROOT / "data" / f"{project_name()}.csv"
+
+
+@dataclass
+class LoadResult:
+    df: pd.DataFrame
+    source: str          # "supabase" or "csv"
+    detail: str = ""
+
+
+def get_connection():
+    """Return a live Supabase connection, or None if it cannot be built."""
+    try:
+        from st_supabase_connection import SupabaseConnection
+
+        return st.connection("supabase", type=SupabaseConnection)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def fetch_table(conn, table: str, page_size: int = PAGE_SIZE) -> pd.DataFrame:
+    """Read a whole table, paging past the 1,000-row PostgREST ceiling."""
+    frames: list[pd.DataFrame] = []
+    start = 0
+    while True:
+        rows = (
+            conn.table(table)
+            .select("*")
+            .range(start, start + page_size - 1)
+            .execute()
+            .data
+        )
+        if not rows:
+            break
+        frames.append(pd.DataFrame(rows))
+        if len(rows) < page_size:
+            break
+        start += page_size
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+@st.cache_data(ttl="10m", show_spinner="Reading records...")
+def load_records() -> LoadResult:
+    conn = get_connection()
+    if conn is not None:
+        try:
+            df = fetch_table(conn, RECORDS_TABLE)
+            if not df.empty:
+                return LoadResult(df, "supabase", f"{len(df):,} rows from Supabase")
+        except Exception as exc:  # noqa: BLE001 -- the fallback is the point
+            return _local(
+                f"Supabase unavailable ({type(exc).__name__}), using the local file"
+            )
+    return _local("no Supabase connection configured, using the local file")
+
+
+def _local(detail: str) -> LoadResult:
+    path = local_csv()
+    if not path.exists():
+        raise FileNotFoundError(f"{path} is missing. Run: python ladder.py prepare")
+    return LoadResult(pd.read_csv(path), "csv", detail)
+
+
+def write_predictions(conn, rows: list[dict]) -> tuple[bool, str]:
+    """Rung 4: the model's output becomes a row someone else can read.
+
+    Without a Supabase connection the rows are appended to data/predictions.csv
+    instead, so the write-then-read-back moment still happens on stage. That
+    file lives only on the machine (or container) running the app -- which is
+    exactly the difference between a local file and a table, and the caption in
+    the app says so.
+    """
+    if conn is None:
+        try:
+            LOCAL_PREDICTIONS.parent.mkdir(parents=True, exist_ok=True)
+            header = not LOCAL_PREDICTIONS.exists()
+            pd.DataFrame(rows).to_csv(
+                LOCAL_PREDICTIONS, mode="a", header=header, index=False
+            )
+            return True, (
+                f"{len(rows)} predictions written to data/{LOCAL_PREDICTIONS.name} "
+                "(local file -- no Supabase connection)"
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, f"local write failed: {type(exc).__name__}: {exc}"
+    try:
+        conn.table(PREDICTIONS_TABLE).insert(rows).execute()
+        return True, f"{len(rows)} predictions written to {PREDICTIONS_TABLE}"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"write failed: {type(exc).__name__}: {exc}"
+
+
+def read_predictions(conn, limit: int = 20) -> pd.DataFrame:
+    if conn is None:
+        if not LOCAL_PREDICTIONS.exists():
+            return pd.DataFrame()
+        try:
+            local = pd.read_csv(LOCAL_PREDICTIONS)
+            return (
+                local.sort_values("created_at", ascending=False)
+                .head(limit)
+                .reset_index(drop=True)
+            )
+        except Exception:  # noqa: BLE001
+            return pd.DataFrame()
+    try:
+        rows = (
+            conn.table(PREDICTIONS_TABLE)
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+            .data
+        )
+        return pd.DataFrame(rows)
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame()
