@@ -1,6 +1,6 @@
 # Rung 3 conversation, rung 4 loop view — design
 
-Status: DRAFT, awaiting approach approval (section 2). 2026-09-09.
+Status: APPROVED 2026-09-09 22:3x — approach A for section 2 (proposes; a button applies).
 Owner of `src/app.py`, `src/rules_chat.py`, `STATUS.md`: this agent. The
 second agent owns `rules_store.py`, `learner.py`, the migration and their
 tests, and follows this work through STATUS.md.
@@ -53,7 +53,7 @@ Rung 3 gets a record source block at the top, before the recommendation:
 - When nothing was scored on rung 2, the picker is open and is the default,
   with a one-line pointer back to rung 2.
 
-## 2. Piece two — the rules chat (three approaches)
+## 2. Piece two — the rules chat (approach A chosen; B and C kept for the record)
 
 **A. Advisory chat that proposes; a button applies. (Recommended.)**
 The agent answers in prose, grounded in rules v{n}, the feedback digest
