@@ -34,6 +34,7 @@ import data as data_mod  # noqa: E402
 import handoff  # noqa: E402
 import insights as insights_mod  # noqa: E402
 import learner as learner_mod  # noqa: E402
+import rules_chat  # noqa: E402
 import model as model_mod  # noqa: E402
 import rules_store  # noqa: E402
 from rungs import RUNGS, SUBHEADS  # noqa: E402
@@ -438,6 +439,9 @@ def rung_recommend(df: pd.DataFrame, spec: model_mod.Spec) -> None:
                 if feedback:
                     st.caption(f"It read the last {min(8, len(feedback))} feedback rows before answering.")
 
+    st.divider()
+    rules_chat_panel(conn, rules_set, feedback, record)
+    st.divider()
     feedback_form(conn, record, rules, rules_set, spec)
 
     st.divider()
@@ -457,6 +461,96 @@ def rung_recommend(df: pd.DataFrame, spec: model_mod.Spec) -> None:
 # The loop -- a verdict on the recommendation, and the agent that learns from it
 # --------------------------------------------------------------------------
 OUTCOMES = {"unknown": "don't know yet", "stayed": "stayed", "left": "left"}
+
+
+def rules_chat_panel(conn, rules_set, feedback: list[dict], record: dict) -> None:
+    """Approach A: the agent talks; a button applies.
+
+    The conversation is keyed to the rules version. When the learner or this
+    panel publishes a new version the page reruns, the key changes, and the
+    conversation starts over on the new rules -- so the console can never be
+    arguing about bands that are no longer live.
+    """
+    st.markdown("##### Talk to the rules")
+    key = f"rules_chat_v{rules_set.version}"
+    if st.session_state.get("rules_chat_key") != key:
+        restarted = "rules_chat_key" in st.session_state
+        st.session_state["rules_chat_key"] = key
+        st.session_state["rules_chat"] = [
+            {"role": "assistant", "content": rules_chat.opening_message(rules_set, record)}
+        ]
+        st.session_state.pop("chat_proposal", None)
+        if restarted:
+            st.caption(f"The rules moved to v{rules_set.version}; the conversation starts over on them.")
+
+    for turn in st.session_state["rules_chat"]:
+        with st.chat_message(turn["role"]):
+            st.markdown(turn["content"])
+
+    if not rules_chat.llm_available():
+        st.info(
+            "GROQ_API_KEY is not set, so the console can state the rules but not "
+            "discuss them. That is the honest state of the demo, not a failure."
+        )
+        return
+
+    prompt = st.chat_input("Ask about the rules, or say what should change")
+    if prompt:
+        st.session_state["rules_chat"].append({"role": "user", "content": prompt})
+        digest_rows = (
+            [d.as_row() for d in learner_mod.digest(rules_set, feedback).values()]
+            if feedback else []
+        )
+        system = rules_chat.system_prompt(rules_set, digest_rows, record)
+        with st.spinner("Thinking..."):
+            turn = rules_chat.reply(st.session_state["rules_chat"], system, current=rules_set)
+        if turn is None:
+            st.session_state["rules_chat"].append(
+                {"role": "assistant", "content": "_No usable answer came back. The rules stand._"}
+            )
+        else:
+            st.session_state["rules_chat"].append({"role": "assistant", "content": turn.text})
+            if turn.bands is not None:
+                st.session_state["chat_proposal"] = {
+                    "bands": turn.bands, "rationale": turn.rationale,
+                    "version": rules_set.version,
+                }
+        st.rerun()
+
+    proposal = st.session_state.get("chat_proposal")
+    if not proposal or proposal["version"] != rules_set.version:
+        return
+    changes = learner_mod._diff(rules_set, proposal["bands"])
+    st.markdown(f"**The console proposes v{rules_set.version + 1}**")
+    if proposal["rationale"]:
+        st.write(proposal["rationale"])
+    if not changes:
+        st.info("Identical to the current bands -- nothing to apply.")
+        return
+    c1, c2 = st.columns(2)
+    c1.markdown(f"v{rules_set.version} (now)")
+    c1.dataframe(pd.DataFrame(rules_set.as_rows()), width="stretch", hide_index=True)
+    c2.markdown(f"v{rules_set.version + 1} (proposed)")
+    c2.dataframe(
+        pd.DataFrame([b.__dict__ for b in proposal["bands"]]),
+        width="stretch", hide_index=True,
+    )
+    for line in changes:
+        st.markdown(f"- {line}")
+    if conn is None:
+        st.warning("No Supabase connection -- the proposal can be seen but not applied.")
+        return
+    if st.button(f"Apply as v{rules_set.version + 1}", type="primary", key="chat_apply"):
+        published = rules_store.publish(
+            conn, proposal["bands"], "chat:groq", proposal["rationale"],
+            {"chat": st.session_state["rules_chat"][-6:]},
+        )
+        st.session_state.pop("chat_proposal", None)
+        st.success(
+            f"Rules v{published.version} is active. The recommendation above now "
+            "comes from it."
+        )
+        st.rerun()
 
 
 def feedback_form(conn, record: dict, rules, rules_set, spec) -> None:
