@@ -15,7 +15,7 @@ medium = { min = 0.35, action = "Add to next month's outreach list" }
 low    = { min = 0.00, action = "No action" }
 
 [model]
-estimator = "logreg"       # the rung-2 gate rewrites this
+estimator = "logreg"   # both families run and compared 2026-09-09; logreg won
 seed = 42
 test_size = 0.2
 categorical_int_max_unique = 10

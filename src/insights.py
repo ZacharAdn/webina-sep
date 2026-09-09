@@ -88,6 +88,7 @@ def explains_missing(df: pd.DataFrame, column: str) -> dict | None:
     nulls = df[df[column].isna()]
     if nulls.empty:
         return None
+    candidates = []
     for other in df.columns:
         if other == column:
             continue
@@ -97,8 +98,14 @@ def explains_missing(df: pd.DataFrame, column: str) -> dict | None:
         value = values[0]
         overall = float((df[other] == value).mean())
         if overall < 1.0 and overall < len(nulls) / len(df) * 5 + 0.5:
-            return {"column": other, "value": value, "n": int(len(nulls))}
-    return None
+            candidates.append((overall, other, value))
+    if not candidates:
+        return None
+    # The tightest candidate wins, not the first one in column order. On the
+    # Telco set dependents = Yes clears the threshold and covers 2,110 rows,
+    # explaining nothing, while tenure = 0 covers exactly the 11 null rows.
+    _, other, value = min(candidates, key=lambda candidate: candidate[0])
+    return {"column": other, "value": value, "n": int(len(nulls))}
 
 
 def discriminative_categoricals(df: pd.DataFrame, target_column: str,
