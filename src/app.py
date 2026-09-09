@@ -206,27 +206,19 @@ def rung_predict(df: pd.DataFrame, spec: model_mod.Spec) -> None:
         pd.DataFrame([trained.baseline.as_row(), trained.metrics.as_row()]),
         width="stretch", hide_index=True,
     )
-    st.markdown(
-        f"**The baseline earns {trained.baseline.accuracy:.0%} accuracy by never "
-        f"predicting a single '{spec.positive_label}'** -- recall "
-        f"{trained.baseline.recall:.0%}, ROC-AUC {trained.baseline.roc_auc:.2f}. The "
-        f"model is worth talking about only because it finds "
-        f"{trained.metrics.recall:.0%} of them at ROC-AUC "
-        f"{trained.metrics.roc_auc:.2f}. Accuracy alone would have hidden that."
-    )
-
-    st.divider()
-    st.markdown("**The same model, two splits, two very different numbers.**")
-    honest, leaky = get_leakage(df, spec)
-    st.dataframe(pd.DataFrame([leaky, honest]), width="stretch", hide_index=True)
     st.caption(
-        f"The upper row balanced the classes before splitting, so copies of the same "
-        f"record sat on both sides of the wall. It reports catching "
-        f"{leaky['recall']:.0%}. The lower row split first and catches "
-        f"{honest['recall']:.0%} (ROC-AUC {leaky['roc_auc']} against "
-        f"{honest['roc_auc']}). Same model class, same data, one line of code apart. "
-        "The first number is the one that gets promised in a meeting."
+        f"The baseline earns {trained.baseline.accuracy:.0%} accuracy without catching "
+        f"a single '{spec.positive_label}'. The model finds {trained.metrics.recall:.0%} "
+        f"of them at ROC-AUC {trained.metrics.roc_auc:.2f}."
     )
+    with st.expander("Why the number can lie -- the leakage demo"):
+        honest, leaky = get_leakage(df, spec)
+        st.dataframe(pd.DataFrame([leaky, honest]), width="stretch", hide_index=True)
+        st.caption(
+            f"Balance the classes before splitting and the same model reports "
+            f"{leaky['recall']:.0%} recall; split first and it is {honest['recall']:.0%}. "
+            "One line of code apart."
+        )
 
     st.divider()
     scoring_form(df, spec)
@@ -304,14 +296,9 @@ def scoring_form(df: pd.DataFrame, spec: model_mod.Spec) -> None:
         )
         slot.caption(bands.recommend({"probability": probability}).action)
 
-    st.caption(
-        "Two families, one record. When they disagree, the gap is the honest "
-        "size of the uncertainty -- and neither number is more true than the "
-        "other because it is larger."
-    )
-
     typed = {column: record[column] for column in drivers + numbers}
     handoff.stash_scored(st.session_state, record, probabilities, typed)
+    st.session_state.pop("table_record", None)
     st.caption("This customer is now the one rung 3 opens on.")
 
     filled = {
@@ -319,7 +306,7 @@ def scoring_form(df: pd.DataFrame, spec: model_mod.Spec) -> None:
         for column, value in record.items()
         if column not in drivers + numbers
     }
-    with st.expander(f"The {len(filled)} fields filled in from the table"):
+    with st.expander(f"{len(filled)} fields filled in from the table"):
         if derived:
             st.caption(
                 "total_charges is derived as tenure x monthly charges, not taken "
@@ -351,24 +338,7 @@ def rung_recommend(df: pd.DataFrame, spec: model_mod.Spec) -> None:
     rules_set = rules_store.load_active(conn)
     bands = agent_mod.Bands.from_rules(rules_set)
     feedback = data_mod.read_feedback(conn)
-
-    st.write(
-        "A probability is not a decision. The bands below are the baseline of the "
-        "recommendation, exactly the way 'nobody is positive' was the baseline of the "
-        "prediction. Anything an agent adds has to beat them."
-    )
-    st.dataframe(
-        pd.DataFrame(
-            [{"band": b.name, "from": f"{b.minimum:.0%}", "action": b.action}
-             for b in bands.bands]
-        ),
-        width="stretch", hide_index=True,
-    )
-    st.caption(
-        f"Rules v{rules_set.version} · source: {rules_set.source}"
-        + (f" · {rules_set.rationale}" if rules_set.source != "toml" else
-           " · these three rows started life in ladder.toml; the learner below writes the next version.")
-    )
+    st.caption(f"A probability is not a decision. Rules v{rules_set.version} turn it into one.")
 
     top = scored.head(25)
     labels = [
@@ -376,85 +346,61 @@ def rung_recommend(df: pd.DataFrame, spec: model_mod.Spec) -> None:
         for _, row in top.iterrows()
     ]
     default = handoff.default_record(st.session_state, spec.estimator, spec.id_column)
+    override = st.session_state.get("table_record")
+
+    if override is not None:
+        record = override
+        who = f"{record[spec.id_column]}, from the table"
+    elif default is not None:
+        record = default
+        typed = st.session_state[handoff.KEY]["typed"]
+        who = " · ".join(
+            value if isinstance(value, str) and value not in ("Yes", "No")
+            else f"{field.replace('_', ' ')} {value:g}" if not isinstance(value, str)
+            else f"{field.replace('_', ' ')} {value}"
+            for field, value in typed.items()
+        )
+    else:
+        st.caption("Nothing scored on rung 2 yet -- score a customer there and it opens here first.")
+        choice = st.selectbox(
+            "Pick a customer from the table", range(len(labels)),
+            format_func=lambda i: labels[i],
+        )
+        record = top.iloc[choice].to_dict()
+        who = f"{record[spec.id_column]}, from the table"
+
+    rules = bands.recommend(record)
+    probability = float(record.get("probability") or 0.0)
+    band = rules_set.band_for(probability)
+    st.markdown(f"**{who}**")
+    st.caption(f"Risk {probability:.0%} -> band '{band.name}'")
+    st.success(rules.action)
+    st.caption(rules.reason)
+
+    st.divider()
+    rules_chat_panel(conn, rules_set, feedback, record)
+    feedback_form(conn, record, rules, rules_set, spec)
+
     if default is not None:
-        stash = st.session_state[handoff.KEY]
-        st.markdown("**The customer you scored on rung 2**")
-        typed = stash["typed"]
-        st.dataframe(
-            pd.DataFrame({"field": list(typed), "value": [typed[c] for c in typed]}),
-            width="stretch", hide_index=True,
-        )
-        shown = stash["probability"]
-        st.caption(
-            " · ".join(f"{model_mod.ESTIMATORS.get(k, k)} {v:.1%}" for k, v in shown.items())
-            + f" · the recommender reads {model_mod.ESTIMATORS.get(spec.estimator, spec.estimator)}."
-        )
-        with st.expander("Or pick one of the 25 highest-risk customers in the table"):
+        with st.expander("Try another customer from the table"):
             st.caption(
                 "Walking real customers one at a time is how you find out whether "
                 "the bands are right. It is the way to formulate the rules the agent "
                 "will act on, not only to read them."
             )
-            use_table = st.checkbox("Use a customer from the table instead", value=False)
             choice = st.selectbox(
-                "Pick a record", range(len(labels)),
-                format_func=lambda i: labels[i], disabled=not use_table,
+                "Pick a customer", range(len(labels)),
+                format_func=lambda i: labels[i], key="table_pick",
             )
-        record = top.iloc[choice].to_dict() if use_table else default
-    else:
-        st.caption(
-            "Nothing scored on rung 2 yet -- score a customer there and it opens "
-            "here first. Until then, pick one of the 25 highest-risk customers."
-        )
-        choice = st.selectbox(
-            "Pick a record", range(len(labels)), format_func=lambda i: labels[i]
-        )
-        record = top.iloc[choice].to_dict()
-
-    rules = bands.recommend(record)
-    left, right = st.columns(2)
-    with left:
-        st.markdown("##### Agent 1 · the rules layer")
-        st.success(rules.action)
-        st.caption(rules.reason)
-    with right:
-        st.markdown("##### gpt-oss-120b on Groq, second opinion")
-        if not agent_mod.llm_available():
-            st.info(
-                "GROQ_API_KEY is not set, so only the rules layer is running. "
-                "That is the honest state of the demo, not a failure."
-            )
-        elif st.button("Ask the agent", type="secondary"):
-            with st.spinner("Thinking..."):
-                llm = agent_mod.recommend_llm(record, rules, feedback=feedback)
-            if llm is None:
-                st.warning(
-                    "The agent did not return a usable answer. The rules layer stands."
-                )
-            else:
-                st.success(llm.action)
-                st.caption(llm.reason)
-                if llm.unknowns:
-                    st.markdown(f"**What it does not know:** {llm.unknowns}")
-                if feedback:
-                    st.caption(f"It read the last {min(8, len(feedback))} feedback rows before answering.")
-
-    st.divider()
-    rules_chat_panel(conn, rules_set, feedback, record)
-    st.divider()
-    feedback_form(conn, record, rules, rules_set, spec)
-
-    st.divider()
-    learner_panel(conn, rules_set, feedback)
-
-    st.divider()
-    st.markdown("**The 25 highest-risk records, with the band that fires on each.**")
-    table = top.copy()
-    table["recommendation"] = [
-        bands.recommend(row).action for row in top.to_dict("records")
-    ]
-    table["probability"] = table["probability"].map("{:.0%}".format)
-    st.dataframe(table, width="stretch", hide_index=True)
+            c1, c2 = st.columns(2)
+            if c1.button("Use this customer", key="use_table"):
+                st.session_state["table_record"] = top.iloc[choice].to_dict()
+                st.rerun()
+            if override is not None and c2.button(
+                "Back to the customer from rung 2", key="back_rung2"
+            ):
+                st.session_state.pop("table_record", None)
+                st.rerun()
 
 
 # --------------------------------------------------------------------------
@@ -565,10 +511,11 @@ def feedback_form(conn, record: dict, rules, rules_set, spec) -> None:
             "What actually happened", list(OUTCOMES), horizontal=True,
             format_func=OUTCOMES.get,
         )
-        better = st.text_input(
-            "A better action, in one line (leave empty if the call was right)"
-        )
-        note = st.text_input("Why? (optional)")
+        with st.expander("I have a better action"):
+            better = st.text_input(
+                "A better action, in one line (leave empty if the call was right)"
+            )
+            note = st.text_input("Why? (optional)")
         sent = st.form_submit_button("Send feedback", type="primary")
     if sent:
         row = {
@@ -600,14 +547,12 @@ def feedback_form(conn, record: dict, rules, rules_set, spec) -> None:
 def learner_panel(conn, rules_set, feedback: list[dict]) -> None:
     """Agent 2. Shows what it read, proposes a revision, and publishes it on request."""
     st.markdown("##### Agent 2 · the one that learns")
-    st.write(
-        "The recommender never reads its own track record. This agent does: it "
-        "folds every verdict onto the band that produced it and rewrites the bands. "
-        "It does not touch the model -- ten verdicts are enough to move a rule, a "
-        "retrain needs thousands of outcomes."
+    st.caption(
+        "It folds every verdict from rung 3 onto the band that produced it and "
+        "rewrites the bands. It never touches the model."
     )
     if not feedback:
-        st.info("No feedback yet. Send one above and this panel wakes up.")
+        st.info("No feedback yet. Send one on rung 3 and this panel wakes up.")
         return
 
     digested = learner_mod.digest(rules_set, feedback)
@@ -655,8 +600,8 @@ def learner_panel(conn, rules_set, feedback: list[dict]) -> None:
         )
         st.session_state.pop("proposal", None)
         st.success(
-            f"Rules v{published.version} is active. Pick the same record above: "
-            "the recommendation now comes from the revised bands."
+            f"Rules v{published.version} is active. Back on rung 3, the "
+            "recommendation now comes from the revised bands."
         )
         st.rerun()
 
@@ -667,11 +612,9 @@ def learner_panel(conn, rules_set, feedback: list[dict]) -> None:
 def rung_production(df: pd.DataFrame, spec: model_mod.Spec,
                     load: data_mod.LoadResult) -> None:
     st.subheader(SUBHEADS[3])
-
-    st.markdown(
-        "The first production version of almost any model is not a real-time "
-        "endpoint. It is a job that writes to a table, and a page that reads the "
-        "table. That is what this tab does."
+    st.caption(
+        "Production here is a job that writes to a table, a page that reads it, "
+        "and a loop that learns from what comes back."
     )
 
     conn = data_mod.get_connection()
@@ -686,11 +629,10 @@ def rung_production(df: pd.DataFrame, spec: model_mod.Spec,
     c3.metric("Rules version", f"v{rules_set.version}")
     c4.metric("Records scored", f"{len(scored):,}")
 
-    n = st.slider(
-        "How many of the riskiest records to write", 5, 100, 25, step=5
-    )
+    left, right = st.columns([3, 1])
+    n = left.slider("How many of the riskiest records to write", 5, 100, 25, step=5)
     target = "Supabase" if conn is not None else "the local predictions file"
-    if st.button(f"Score and write to {target}", type="primary"):
+    if right.button(f"Score and write to {target}", type="primary"):
         now = datetime.now(timezone.utc).isoformat()
         rows = [
             {
@@ -705,39 +647,22 @@ def rung_production(df: pd.DataFrame, spec: model_mod.Spec,
         ok, message = data_mod.write_predictions(conn, rows)
         (st.success if ok else st.error)(message)
 
-    st.markdown("**What is in the predictions table right now**")
-    recent = data_mod.read_predictions(conn)
-    if recent.empty:
-        st.info(
-            "Nothing to read yet -- press the button above. Without a Supabase "
-            "connection the rows go to data/predictions.csv; run "
-            "`python ladder.py supabase` to get the table."
-        )
-    else:
-        st.dataframe(recent, width="stretch", hide_index=True)
-        st.caption(
-            "Local mode: this is data/predictions.csv on the machine running the app. "
-            "It disappears with the container and nobody else can read it -- that gap "
-            "is exactly what the Supabase table closes."
-            if conn is None else
-            "This table is the audit trail. Someone who was not in the room can read "
-            "what the model said, when, and under which version -- without running "
-            "any of this code."
-        )
-
-    st.markdown("**How much of the loop has closed**")
+    st.divider()
+    st.markdown("**The loop**")
     counts = data_mod.loop_counts(conn)
     l1, l2, l3 = st.columns(3)
     l1.metric("Decisions logged", f"{counts['logged']:,}")
     l2.metric("With an outcome", f"{counts['with_outcome']:,}")
     l3.metric("Verdicts from people", f"{counts['verdicts']:,}")
     st.caption(
-        "On the day this was built the middle number was zero, and that was the "
-        "point: the column exists and waits for reality. Every verdict on rung 3 "
-        "fills it, and the learner there rewrites the rules from it."
+        "Every verdict on rung 3 fills the middle number; the learner below "
+        "rewrites the rules from it."
     )
+    feedback = data_mod.read_feedback(conn)
+    learner_panel(conn, rules_set, feedback)
 
-    st.markdown("**Rules history -- what the learner and the console have published**")
+    st.divider()
+    st.markdown("**Rules history**")
     versions = rules_store.history(conn)
     if not versions:
         st.info("No Supabase connection, so no history: the rules are ladder.toml's v1.")
@@ -753,28 +678,27 @@ def rung_production(df: pd.DataFrame, spec: model_mod.Spec,
             previous = rules_store.from_row(versions[1])
             for line in learner_mod._diff(previous, newest.bands):
                 st.markdown(f"- v{previous.version} -> v{newest.version}: {line}")
-        st.caption(
-            "Every row is a decision someone can audit: who changed the rules, from "
-            "what evidence, and when. The model was never touched -- ten verdicts "
-            "move a rule, a retrain needs thousands of outcomes."
-        )
+        st.caption("Who changed the rules, from what evidence, and when. The model was never touched.")
 
-    st.markdown("**Latest verdicts from people**")
-    verdicts = data_mod.read_feedback(conn, limit=10)
-    if not verdicts:
-        st.info("No feedback yet. Rung 3 collects it under every recommendation.")
-    else:
-        frame = pd.DataFrame(verdicts[::-1])
-        columns = ("created_at", "record_id", "recommended_action", "verdict",
-                   "actual_outcome", "better_action", "rules_version")
-        st.dataframe(
-            frame[[c for c in columns if c in frame.columns]],
-            width="stretch", hide_index=True,
-        )
-        st.caption(
-            "This is the input the learner reads: the recommendation, what a person "
-            "said about it, and what actually happened."
-        )
+    with st.expander("Audit trail -- the predictions table"):
+        recent = data_mod.read_predictions(conn)
+        if recent.empty:
+            st.info("Nothing written yet -- press the button above.")
+        else:
+            st.dataframe(recent, width="stretch", hide_index=True)
+
+    with st.expander("Latest verdicts from people"):
+        verdicts = data_mod.read_feedback(conn, limit=10)
+        if not verdicts:
+            st.info("No feedback yet. Rung 3 collects it under every recommendation.")
+        else:
+            frame = pd.DataFrame(verdicts[::-1])
+            columns = ("created_at", "record_id", "recommended_action", "verdict",
+                       "actual_outcome", "better_action", "rules_version")
+            st.dataframe(
+                frame[[c for c in columns if c in frame.columns]],
+                width="stretch", hide_index=True,
+            )
 
 
 if __name__ == "__main__":
