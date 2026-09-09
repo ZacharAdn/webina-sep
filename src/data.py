@@ -29,6 +29,7 @@ LOCAL_PREDICTIONS = REPO_ROOT / "data" / "predictions.csv"
 PAGE_SIZE = 1000
 RECORDS_TABLE = "records"
 PREDICTIONS_TABLE = "predictions"
+FEEDBACK_TABLE = "feedback"
 
 
 def project_name() -> str:
@@ -167,3 +168,66 @@ def read_predictions(conn, limit: int = 20) -> pd.DataFrame:
         return pd.DataFrame(rows)
     except Exception:  # noqa: BLE001
         return pd.DataFrame()
+
+
+# --------------------------------------------------------------------------
+# The loop -- feedback in, outcomes back, and the numbers rung 4 reports
+# --------------------------------------------------------------------------
+def write_feedback(conn, row: dict) -> tuple[bool, str]:
+    """One person's verdict on one recommendation. Local mode keeps it in session only."""
+    if conn is None:
+        st.session_state.setdefault("local_feedback", []).append(row)
+        return True, "recorded in this session only (no Supabase connection)"
+    try:
+        conn.table(FEEDBACK_TABLE).insert(row).execute()
+        if row.get("prediction_id") and row.get("actual_outcome") in ("stayed", "left"):
+            conn.table(PREDICTIONS_TABLE).update({
+                "outcome": row["actual_outcome"],
+                "outcome_at": row.get("created_at"),
+            }).eq("id", row["prediction_id"]).execute()
+        return True, "feedback written to Supabase"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"feedback write failed: {type(exc).__name__}: {exc}"
+
+
+def read_feedback(conn, limit: int = 200) -> list[dict]:
+    if conn is None:
+        return list(st.session_state.get("local_feedback", []))
+    try:
+        return (
+            conn.table(FEEDBACK_TABLE).select("*")
+            .order("created_at", desc=True).limit(limit).execute().data
+        )[::-1]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def latest_prediction_for(conn, record_id: str) -> dict | None:
+    """The most recent logged decision for a record, so feedback can point at it."""
+    if conn is None:
+        return None
+    try:
+        rows = (
+            conn.table(PREDICTIONS_TABLE).select("id,probability,recommended_action,created_at")
+            .eq("record_id", record_id).order("created_at", desc=True).limit(1)
+            .execute().data
+        )
+        return rows[0] if rows else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def loop_counts(conn) -> dict:
+    """Decisions logged, how many carry an outcome, how many verdicts came in."""
+    if conn is None:
+        return {"logged": 0, "with_outcome": 0, "verdicts": len(read_feedback(conn))}
+    try:
+        logged = conn.table(PREDICTIONS_TABLE).select("id", count="exact").limit(1).execute().count or 0
+        with_outcome = (
+            conn.table(PREDICTIONS_TABLE).select("id", count="exact")
+            .not_.is_("outcome", "null").limit(1).execute().count or 0
+        )
+        verdicts = conn.table(FEEDBACK_TABLE).select("id", count="exact").limit(1).execute().count or 0
+        return {"logged": logged, "with_outcome": with_outcome, "verdicts": verdicts}
+    except Exception:  # noqa: BLE001
+        return {"logged": 0, "with_outcome": 0, "verdicts": 0}

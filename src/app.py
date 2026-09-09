@@ -2,8 +2,11 @@
 
 Rung 1  describe   -- the dashboard, reading records out of Supabase
 Rung 2  predict    -- a model, its baseline, and the leakage story
-Rung 3  recommend  -- bands from ladder.toml, and gpt-oss-120b as the second opinion
-Rung 4  production -- write the predictions back to a table, and deploy
+Rung 3  recommend  -- versioned bands, gpt-oss-120b as the second opinion, and
+                      the loop: a verdict on each recommendation, and a second
+                      agent that rewrites the bands from those verdicts
+Rung 4  production -- write the predictions back to a table, deploy, and count
+                      how much of the loop has closed
 
 Nothing here is dataset-specific: every number and every column name in the
 captions is computed from the table that was actually loaded. The only file
@@ -29,7 +32,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent as agent_mod  # noqa: E402
 import data as data_mod  # noqa: E402
 import insights as insights_mod  # noqa: E402
+import learner as learner_mod  # noqa: E402
 import model as model_mod  # noqa: E402
+import rules_store  # noqa: E402
 from rungs import RUNGS, SUBHEADS  # noqa: E402
 
 st.set_page_config(page_title="From data to production", page_icon="📶", layout="wide")
@@ -328,13 +333,16 @@ def scoring_form(df: pd.DataFrame, spec: model_mod.Spec) -> None:
 def rung_recommend(df: pd.DataFrame, spec: model_mod.Spec) -> None:
     st.subheader(SUBHEADS[2])
 
+    conn = data_mod.get_connection()
     trained = get_model(df, spec)
     ranked = insights_mod.discriminative_categoricals(
         df, spec.target, spec.positive_label, k=2
     )
     extra = [row["column"] for row in ranked]
     scored = model_mod.score_records(trained, df, spec, extra)
-    bands = agent_mod.Bands.load()
+    rules_set = rules_store.load_active(conn)
+    bands = agent_mod.Bands.from_rules(rules_set)
+    feedback = data_mod.read_feedback(conn)
 
     st.write(
         "A probability is not a decision. The bands below are the baseline of the "
@@ -348,7 +356,11 @@ def rung_recommend(df: pd.DataFrame, spec: model_mod.Spec) -> None:
         ),
         width="stretch", hide_index=True,
     )
-    st.caption("These three rows live in ladder.toml. Change one and rerun.")
+    st.caption(
+        f"Rules v{rules_set.version} · source: {rules_set.source}"
+        + (f" · {rules_set.rationale}" if rules_set.source != "toml" else
+           " · these three rows started life in ladder.toml; the learner below writes the next version.")
+    )
 
     top = scored.head(25)
     labels = [
@@ -363,7 +375,7 @@ def rung_recommend(df: pd.DataFrame, spec: model_mod.Spec) -> None:
     rules = bands.recommend(record)
     left, right = st.columns(2)
     with left:
-        st.markdown("##### The rules layer")
+        st.markdown("##### Agent 1 · the rules layer")
         st.success(rules.action)
         st.caption(rules.reason)
     with right:
@@ -375,7 +387,7 @@ def rung_recommend(df: pd.DataFrame, spec: model_mod.Spec) -> None:
             )
         elif st.button("Ask the agent", type="secondary"):
             with st.spinner("Thinking..."):
-                llm = agent_mod.recommend_llm(record, rules)
+                llm = agent_mod.recommend_llm(record, rules, feedback=feedback)
             if llm is None:
                 st.warning(
                     "The agent did not return a usable answer. The rules layer stands."
@@ -385,6 +397,13 @@ def rung_recommend(df: pd.DataFrame, spec: model_mod.Spec) -> None:
                 st.caption(llm.reason)
                 if llm.unknowns:
                     st.markdown(f"**What it does not know:** {llm.unknowns}")
+                if feedback:
+                    st.caption(f"It read the last {min(8, len(feedback))} feedback rows before answering.")
+
+    feedback_form(conn, record, rules, rules_set, spec)
+
+    st.divider()
+    learner_panel(conn, rules_set, feedback)
 
     st.divider()
     st.markdown("**The 25 highest-risk records, with the band that fires on each.**")
@@ -394,6 +413,120 @@ def rung_recommend(df: pd.DataFrame, spec: model_mod.Spec) -> None:
     ]
     table["probability"] = table["probability"].map("{:.0%}".format)
     st.dataframe(table, width="stretch", hide_index=True)
+
+
+# --------------------------------------------------------------------------
+# The loop -- a verdict on the recommendation, and the agent that learns from it
+# --------------------------------------------------------------------------
+OUTCOMES = {"unknown": "don't know yet", "stayed": "stayed", "left": "left"}
+
+
+def feedback_form(conn, record: dict, rules, rules_set, spec) -> None:
+    """One verdict per recommendation. This is the input the whole loop runs on."""
+    st.markdown("##### Was this the right call? Tell the system.")
+    record_id = str(record[spec.id_column])
+    logged = data_mod.latest_prediction_for(conn, record_id)
+    with st.form(f"feedback_{record_id}", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        verdict = c1.radio("The recommendation was", ["right", "wrong"], horizontal=True)
+        outcome = c2.radio(
+            "What actually happened", list(OUTCOMES), horizontal=True,
+            format_func=OUTCOMES.get,
+        )
+        better = st.text_input(
+            "A better action, in one line (leave empty if the call was right)"
+        )
+        note = st.text_input("Why? (optional)")
+        sent = st.form_submit_button("Send feedback", type="primary")
+    if sent:
+        row = {
+            "prediction_id": (logged or {}).get("id"),
+            "record_id": record_id,
+            "probability": round(float(record.get("probability") or 0.0), 4),
+            "recommended_action": rules.action,
+            "verdict": verdict,
+            "actual_outcome": outcome,
+            "better_action": better.strip() or None,
+            "note": note.strip() or None,
+            "rules_version": rules_set.version,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        ok, message = data_mod.write_feedback(conn, row)
+        (st.success if ok else st.error)(message)
+        if ok and logged:
+            st.caption(
+                f"Attached to prediction #{logged['id']} from "
+                f"{str(logged.get('created_at', ''))[:16]} -- its outcome column is filled now."
+            )
+    elif logged is None:
+        st.caption(
+            "No logged decision for this record yet -- the feedback is still saved, "
+            "it just has no prediction row to attach an outcome to. Rung 4 writes those."
+        )
+
+
+def learner_panel(conn, rules_set, feedback: list[dict]) -> None:
+    """Agent 2. Shows what it read, proposes a revision, and publishes it on request."""
+    st.markdown("##### Agent 2 · the one that learns")
+    st.write(
+        "The recommender never reads its own track record. This agent does: it "
+        "folds every verdict onto the band that produced it and rewrites the bands. "
+        "It does not touch the model -- ten verdicts are enough to move a rule, a "
+        "retrain needs thousands of outcomes."
+    )
+    if not feedback:
+        st.info("No feedback yet. Send one above and this panel wakes up.")
+        return
+
+    digested = learner_mod.digest(rules_set, feedback)
+    st.dataframe(
+        pd.DataFrame([d.as_row() for d in digested.values()]),
+        width="stretch", hide_index=True,
+    )
+    st.caption(f"{len(feedback)} verdicts read, on rules v{rules_set.version}.")
+
+    prefer_llm = st.toggle(
+        "Let gpt-oss-120b write the revision (the rule-based learner runs otherwise)",
+        value=learner_mod.llm_available(), disabled=not learner_mod.llm_available(),
+    )
+    if st.button("Let the learner revise the rules", type="primary"):
+        with st.spinner("Reading the verdicts..."):
+            proposal = learner_mod.propose(rules_set, feedback, prefer_llm=prefer_llm)
+        st.session_state["proposal"] = proposal
+
+    proposal = st.session_state.get("proposal")
+    if proposal is None or proposal.before.version != rules_set.version:
+        return
+
+    st.markdown(f"**Proposal by `{proposal.source}`**")
+    st.write(proposal.rationale)
+    if not proposal.changed:
+        st.info("The evidence does not move any band yet. That is a finding, not a failure.")
+        return
+    before = pd.DataFrame(proposal.before.as_rows())
+    after = pd.DataFrame([b.__dict__ for b in proposal.bands])
+    c1, c2 = st.columns(2)
+    c1.markdown(f"v{proposal.before.version} (now)")
+    c1.dataframe(before, width="stretch", hide_index=True)
+    c2.markdown(f"v{proposal.before.version + 1} (proposed)")
+    c2.dataframe(after, width="stretch", hide_index=True)
+    for line in proposal.changes:
+        st.markdown(f"- {line}")
+
+    if conn is None:
+        st.warning("No Supabase connection -- the revision can be seen but not published.")
+        return
+    if st.button(f"Publish v{proposal.before.version + 1} -- the recommender uses it from now on",
+                 type="secondary"):
+        published = rules_store.publish(
+            conn, proposal.bands, proposal.source, proposal.rationale, proposal.evidence
+        )
+        st.session_state.pop("proposal", None)
+        st.success(
+            f"Rules v{published.version} is active. Pick the same record above: "
+            "the recommendation now comes from the revised bands."
+        )
+        st.rerun()
 
 
 # --------------------------------------------------------------------------
@@ -412,12 +545,14 @@ def rung_production(df: pd.DataFrame, spec: model_mod.Spec,
     conn = data_mod.get_connection()
     trained = get_model(df, spec)
     scored = model_mod.score_records(trained, df, spec, [])
-    bands = agent_mod.Bands.load()
+    rules_set = rules_store.load_active(conn)
+    bands = agent_mod.Bands.from_rules(rules_set)
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Data source", "Supabase" if load.source == "supabase" else "local CSV")
     c2.metric("Model version", trained.version)
-    c3.metric("Records scored", f"{len(scored):,}")
+    c3.metric("Rules version", f"v{rules_set.version}")
+    c4.metric("Records scored", f"{len(scored):,}")
 
     n = st.slider(
         "How many of the riskiest records to write", 5, 100, 25, step=5
@@ -430,13 +565,25 @@ def rung_production(df: pd.DataFrame, spec: model_mod.Spec,
                 "record_id": str(row[spec.id_column]),
                 "probability": round(float(row["probability"]), 4),
                 "recommended_action": bands.recommend(row).action,
-                "model_version": trained.version,
+                "model_version": f"{trained.version} · rules v{rules_set.version}",
                 "created_at": now,
             }
             for row in scored.head(n).to_dict("records")
         ]
         ok, message = data_mod.write_predictions(conn, rows)
         (st.success if ok else st.error)(message)
+
+    st.markdown("**How much of the loop has closed**")
+    counts = data_mod.loop_counts(conn)
+    l1, l2, l3 = st.columns(3)
+    l1.metric("Decisions logged", f"{counts['logged']:,}")
+    l2.metric("With an outcome", f"{counts['with_outcome']:,}")
+    l3.metric("Verdicts from people", f"{counts['verdicts']:,}")
+    st.caption(
+        "On the day this was built the middle number was zero, and that was the "
+        "point: the column exists and waits for reality. Every verdict on rung 3 "
+        "fills it, and the learner there rewrites the rules from it."
+    )
 
     st.markdown("**What is in the predictions table right now**")
     recent = data_mod.read_predictions(conn)
