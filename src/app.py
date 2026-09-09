@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -48,8 +49,21 @@ CONTRA = "#dc2626"
 
 
 @st.cache_resource(show_spinner="Training the model...")
-def get_model(df: pd.DataFrame, _spec: model_mod.Spec) -> model_mod.TrainedModel:
-    return model_mod.train_model(df, _spec)
+def get_model_for(df: pd.DataFrame, _spec: model_mod.Spec,
+                  estimator: str) -> model_mod.TrainedModel:
+    """One trained pipeline per estimator, keyed on the estimator's name.
+
+    Streamlit's underscore rule leaves `_spec` out of the cache key. Asking
+    this function for two families with the spec alone would therefore have
+    handed back the same pipeline twice, with no error and no warning. The
+    plain string is what makes the two calls distinct.
+    """
+    return model_mod.train_model(df, replace(_spec, estimator=estimator))
+
+
+def get_model(df: pd.DataFrame, spec: model_mod.Spec) -> model_mod.TrainedModel:
+    """The family ladder.toml chose. Everything else on the page uses this."""
+    return get_model_for(df, spec, spec.estimator)
 
 
 @st.cache_data(show_spinner="Running the leakage comparison...")
@@ -206,6 +220,106 @@ def rung_predict(df: pd.DataFrame, spec: model_mod.Spec) -> None:
         f"{honest['roc_auc']}). Same model class, same data, one line of code apart. "
         "The first number is the one that gets promised in a meeting."
     )
+
+    st.divider()
+    scoring_form(df, spec)
+
+
+FORM_NUMERIC = ("tenure", "monthly_charges")
+FORM_CATEGORICAL_MAX = 4
+
+
+def scoring_form(df: pd.DataFrame, spec: model_mod.Spec) -> None:
+    """Score a customer who is not in the table, on both model families.
+
+    Six fields, and which six is a question asked of the data rather than a list
+    written here: the strongest categorical separators come from the same
+    function rung 1 uses. The other columns are filled from the table and shown,
+    because a default nobody can see is a number nobody can argue with.
+    """
+    numeric, categorical = model_mod.split_columns(df, spec)
+    defaults = model_mod.feature_defaults(df, spec)
+    drivers = [
+        row["column"]
+        for row in insights_mod.discriminative_categoricals(
+            df, spec.target, spec.positive_label, k=FORM_CATEGORICAL_MAX
+        )
+        if row["column"] in categorical
+    ]
+    numbers = [column for column in FORM_NUMERIC if column in numeric]
+
+    st.markdown("**Score a customer who is not in the table.**")
+    record = dict(defaults)
+    with st.form("score_one"):
+        slots = st.columns(2)
+        for position, column in enumerate(drivers + numbers):
+            slot = slots[position % 2]
+            label = column.replace("_", " ")
+            if column in drivers:
+                values = sorted(df[column].dropna().unique().tolist(), key=str)
+                start = values.index(defaults[column]) if defaults[column] in values else 0
+                record[column] = slot.selectbox(label, values, index=start)
+            else:
+                record[column] = slot.number_input(
+                    label,
+                    min_value=float(df[column].min()),
+                    max_value=float(df[column].max()),
+                    value=float(defaults[column]),
+                )
+        submitted = st.form_submit_button("Score this customer", type="primary")
+
+    if not submitted:
+        st.caption(
+            f"{len(drivers) + len(numbers)} fields are yours; the remaining "
+            f"{len(numeric) + len(categorical) - len(drivers) - len(numbers)} come "
+            "from the table and are listed with the result."
+        )
+        return
+
+    derived = []
+    if "total_charges" in numeric and {"tenure", "monthly_charges"} <= set(record):
+        record["total_charges"] = float(record["tenure"]) * float(
+            record["monthly_charges"]
+        )
+        derived.append("total_charges")
+
+    bands = agent_mod.Bands.load()
+    left, right = st.columns(2)
+    for slot, estimator in ((left, "logreg"), (right, "tree")):
+        trained = get_model_for(df, spec, estimator)
+        probability = model_mod.score_record(trained, record)
+        slot.metric(
+            model_mod.ESTIMATORS.get(estimator, estimator),
+            f"{probability:.1%}",
+            help=f"P({spec.positive_label}) for the record above",
+        )
+        slot.caption(bands.recommend({"probability": probability}).action)
+
+    st.caption(
+        "Two families, one record. When they disagree, the gap is the honest "
+        "size of the uncertainty -- and neither number is more true than the "
+        "other because it is larger."
+    )
+
+    filled = {
+        column: value
+        for column, value in record.items()
+        if column not in drivers + numbers
+    }
+    with st.expander(f"The {len(filled)} fields filled in from the table"):
+        if derived:
+            st.caption(
+                "total_charges is derived as tenure x monthly charges, not taken "
+                "from the table: a median total against a one-month tenure would "
+                "be a contradiction to feed the model."
+            )
+        st.dataframe(
+            pd.DataFrame(
+                {"column": list(filled), "value": [filled[c] for c in filled]}
+            ),
+            width="stretch",
+            hide_index=True,
+        )
 
 
 # --------------------------------------------------------------------------

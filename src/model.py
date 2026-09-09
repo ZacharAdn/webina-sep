@@ -245,6 +245,36 @@ def train_model(df: pd.DataFrame, spec: Spec) -> TrainedModel:
     )
 
 
+def feature_defaults(df: pd.DataFrame, spec: Spec) -> dict:
+    """A complete record built out of the table itself.
+
+    The scoring form on rung 2 asks for a handful of columns, not nineteen. The
+    rest have to come from somewhere, and the table is the only honest source:
+    the median for a measurement, the most common value for a category. The app
+    shows what was filled in, so the defaulting is on screen rather than hidden.
+    """
+    numeric, categorical = split_columns(df, spec)
+    defaults: dict = {}
+    for column in numeric:
+        defaults[column] = float(df[column].median())
+    for column in categorical:
+        modes = df[column].mode(dropna=True)
+        defaults[column] = modes.iloc[0] if not modes.empty else ""
+    return defaults
+
+
+def score_record(trained: TrainedModel, record: dict) -> float:
+    """P(positive) for one record, from a model that is already trained.
+
+    The pipeline carries the imputer, the scaler and the encoder, so a raw dict
+    of human-typed values is all this needs -- and a column the caller left out
+    arrives as NaN, which the imputer handles the same way it did in training.
+    """
+    columns = trained.numeric + trained.categorical
+    row = pd.DataFrame([{column: record.get(column) for column in columns}])
+    return float(trained.pipeline.predict_proba(row)[0, 1])
+
+
 def leakage_demo(df: pd.DataFrame, spec: Spec) -> tuple[Metrics, Metrics]:
     """The same decision tree, two splits, two numbers that are far apart.
 

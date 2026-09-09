@@ -69,7 +69,31 @@ def run(cfg: LadderConfig) -> dict:
 
 
 def _prediction_count(cfg: LadderConfig) -> int:
+    """Rows in both destinations, summed.
+
+    The app writes to Supabase the moment secrets exist and falls back to the
+    CSV when they do not. Counting only the CSV made rows_written 0 on every
+    live run -- the step still passed, but the assertion built on it could not.
+    Summing both means the number grows wherever the click actually landed.
+    """
+    total = 0
     path = cfg.root / "data" / "predictions.csv"
-    if not path.exists():
+    if path.exists():
+        total += max(sum(1 for _ in path.open(encoding="utf-8")) - 1, 0)
+    return total + _supabase_count(cfg)
+
+
+def _supabase_count(cfg: LadderConfig) -> int:
+    """Rows in the live predictions table, or 0 when there is no live table."""
+    from . import verify_step
+    from ..schema import PREDICTIONS_TABLE
+
+    try:
+        url, key = verify_step.secrets(cfg)
+        _, headers, _ = verify_step.rest(
+            url, key, f"{PREDICTIONS_TABLE}?select=id&limit=1",
+            headers={"Prefer": "count=exact", "Range": "0-0"},
+        )
+        return verify_step.parse_count(headers.get("content-range"))
+    except LadderError:
         return 0
-    return max(sum(1 for _ in path.open(encoding="utf-8")) - 1, 0)
