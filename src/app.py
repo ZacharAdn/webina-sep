@@ -370,15 +370,12 @@ def rung_recommend(df: pd.DataFrame, spec: model_mod.Spec) -> None:
         who = f"{record[spec.id_column]}, from the table"
 
     rules = bands.recommend(record)
-    probability = float(record.get("probability") or 0.0)
-    band = rules_set.band_for(probability)
     st.markdown(f"**{who}**")
-    st.caption(f"Risk {probability:.0%} -> band '{band.name}'")
     st.success(rules.action)
     st.caption(rules.reason)
 
     st.divider()
-    rules_chat_panel(conn, rules_set, feedback, record)
+    rules_chat_panel(conn, rules_set, feedback, record, str(record[spec.id_column]))
     feedback_form(conn, record, rules, rules_set, spec)
 
     if default is not None:
@@ -409,7 +406,8 @@ def rung_recommend(df: pd.DataFrame, spec: model_mod.Spec) -> None:
 OUTCOMES = {"unknown": "don't know yet", "stayed": "stayed", "left": "left"}
 
 
-def rules_chat_panel(conn, rules_set, feedback: list[dict], record: dict) -> None:
+def rules_chat_panel(conn, rules_set, feedback: list[dict], record: dict,
+                     record_id: str) -> None:
     """Approach A: the agent talks; a button applies.
 
     The conversation is keyed to the rules version. When the learner or this
@@ -418,9 +416,10 @@ def rules_chat_panel(conn, rules_set, feedback: list[dict], record: dict) -> Non
     arguing about bands that are no longer live.
     """
     st.markdown("##### Talk to the rules")
-    key = f"rules_chat_v{rules_set.version}"
+    key = rules_chat.chat_key(rules_set, record_id)
     if st.session_state.get("rules_chat_key") != key:
-        restarted = "rules_chat_key" in st.session_state
+        previous = st.session_state.get("rules_chat_key", "")
+        restarted = bool(previous) and not previous.startswith(f"rules_chat_v{rules_set.version}_")
         st.session_state["rules_chat_key"] = key
         st.session_state["rules_chat"] = [
             {"role": "assistant", "content": rules_chat.opening_message(rules_set, record)}

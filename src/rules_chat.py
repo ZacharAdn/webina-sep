@@ -29,6 +29,17 @@ class ChatTurn:
     rationale: str = ""
 
 
+def chat_key(rules: RuleSet, record_id: str) -> str:
+    """The session key the console's conversation lives under.
+
+    It moves with the rules version and with the customer: Streamlit renders
+    every tab on every run, so the console can be born on the table's top
+    customer before rung 2 has scored anyone, and a key that only tracked the
+    version would keep that first opening message forever.
+    """
+    return f"rules_chat_v{rules.version}_{record_id}"
+
+
 def llm_available() -> bool:
     return bool(os.environ.get("GROQ_API_KEY"))
 

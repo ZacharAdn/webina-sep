@@ -97,3 +97,19 @@ def test_reply_is_none_without_a_key_and_without_a_client(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     assert rules_chat.reply([{"role": "user", "content": "hi"}], "s") is None
+
+
+def test_chat_key_changes_with_the_customer_and_with_the_rules_version():
+    """Streamlit renders every tab on every run, so the console can be born on a
+    different customer than the one rung 3 later shows. The session key must
+    move with the customer, or the opening message goes stale."""
+    v2 = RuleSet(2, V1.bands, "learner:rules", "moved")
+
+    same = rules_chat.chat_key(V1, "rung2:abc123")
+    other_customer = rules_chat.chat_key(V1, "7590-VHVEG")
+    other_version = rules_chat.chat_key(v2, "rung2:abc123")
+
+    assert same == rules_chat.chat_key(V1, "rung2:abc123")
+    assert same != other_customer
+    assert same != other_version
+    assert "v1" in same and "rung2:abc123" in same
