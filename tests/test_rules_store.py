@@ -37,3 +37,19 @@ def test_agent_bands_from_a_revised_ruleset_flip_the_recommendation():
     before = agent_mod.Bands.load(ROOT).recommend({"probability": 0.9}).action
     after = agent_mod.Bands.from_rules(revised).recommend({"probability": 0.9}).action
     assert before != after and after == "List"
+
+
+def test_history_rows_carry_bands_so_rung_4_can_show_before_and_after(monkeypatch):
+    class Q:
+        def __init__(self): self.cols = ""
+        def select(self, cols): self.cols = cols; return self
+        def order(self, *a, **k): return self
+        def limit(self, n): return self
+        def execute(self):
+            class R: data = [{"version": 1, "bands": [], "active": True}]
+            assert "bands" in self.cols
+            return R()
+    class Conn:
+        def table(self, name): return Q()
+    rows = rules_store.history(Conn())
+    assert rows and "bands" in rows[0]

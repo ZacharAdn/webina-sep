@@ -104,7 +104,8 @@ def history(conn, limit: int = 10) -> list[dict]:
         return []
     try:
         return (
-            conn.table(RULES_TABLE).select("version,source,rationale,active,created_at")
+            conn.table(RULES_TABLE)
+            .select("version,source,rationale,active,created_at,bands")
             .order("version", desc=True).limit(limit).execute().data
         )
     except Exception:  # noqa: BLE001
