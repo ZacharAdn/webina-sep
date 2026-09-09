@@ -149,6 +149,16 @@ def split_columns(df: pd.DataFrame, spec: Spec) -> tuple[list[str], list[str]]:
 
 
 def _xy(df: pd.DataFrame, spec: Spec) -> tuple[pd.DataFrame, pd.Series, list, list]:
+    """Sorted by the id column first, so every caller gets the same split.
+
+    train_test_split shuffles positions from a fixed seed, which quietly makes
+    the split a function of the incoming row order. The CSV arrives in file
+    order and Supabase in whatever order PostgREST chose, so without this line
+    the app quoted recall 0.540 where REPORT.md quoted 0.559 -- same rows, same
+    model, same seed. A demo cannot survive that.
+    """
+    if spec.id_column in df.columns:
+        df = df.sort_values(spec.id_column, kind="stable").reset_index(drop=True)
     y = (df[spec.target].astype(str).str.strip() == spec.positive_label).astype(int)
     numeric, categorical = split_columns(df, spec)
     return df[numeric + categorical], y, numeric, categorical

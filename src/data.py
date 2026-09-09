@@ -22,6 +22,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from insights import to_snake
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_PREDICTIONS = REPO_ROOT / "data" / "predictions.csv"
 PAGE_SIZE = 1000
@@ -36,6 +38,13 @@ def project_name() -> str:
 
 def local_csv() -> Path:
     return REPO_ROOT / "data" / f"{project_name()}.csv"
+
+
+def id_column() -> str:
+    """The column every paged read is ordered by."""
+    with (REPO_ROOT / "ladder.toml").open("rb") as fh:
+        dataset = tomllib.load(fh)["dataset"]
+    return to_snake(str(dataset.get("id_column", "") or "")) or "row_id"
 
 
 @dataclass
@@ -55,18 +64,24 @@ def get_connection():
         return None
 
 
-def fetch_table(conn, table: str, page_size: int = PAGE_SIZE) -> pd.DataFrame:
-    """Read a whole table, paging past the 1,000-row PostgREST ceiling."""
+def fetch_table(conn, table: str, order_by: str = "",
+                page_size: int = PAGE_SIZE) -> pd.DataFrame:
+    """Read a whole table, paging past the 1,000-row PostgREST ceiling.
+
+    The ORDER BY is not decoration. PostgREST leaves row order unspecified
+    without one, so paging with .range() walks an order the server never
+    promised to keep -- a row can appear on two pages and be missing from the
+    result. Even when the rows all arrive, they arrive in a different order than
+    the CSV, and train_test_split splits by position: the app reported recall
+    0.540 where REPORT.md said 0.559, on the same 7,043 rows and the same model.
+    """
     frames: list[pd.DataFrame] = []
     start = 0
     while True:
-        rows = (
-            conn.table(table)
-            .select("*")
-            .range(start, start + page_size - 1)
-            .execute()
-            .data
-        )
+        query = conn.table(table).select("*")
+        if order_by:
+            query = query.order(order_by)
+        rows = query.range(start, start + page_size - 1).execute().data
         if not rows:
             break
         frames.append(pd.DataFrame(rows))
@@ -81,7 +96,7 @@ def load_records() -> LoadResult:
     conn = get_connection()
     if conn is not None:
         try:
-            df = fetch_table(conn, RECORDS_TABLE)
+            df = fetch_table(conn, RECORDS_TABLE, order_by=id_column())
             if not df.empty:
                 return LoadResult(df, "supabase", f"{len(df):,} rows from Supabase")
         except Exception as exc:  # noqa: BLE001 -- the fallback is the point

@@ -43,3 +43,7 @@ __pycache__/
 .ladder/
 .streamlit/secrets.toml
 data/predictions.csv
+
+# playwright-mcp artefacts, never part of the repo
+.playwright-mcp/
+*.png
