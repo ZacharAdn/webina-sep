@@ -705,18 +705,6 @@ def rung_production(df: pd.DataFrame, spec: model_mod.Spec,
         ok, message = data_mod.write_predictions(conn, rows)
         (st.success if ok else st.error)(message)
 
-    st.markdown("**How much of the loop has closed**")
-    counts = data_mod.loop_counts(conn)
-    l1, l2, l3 = st.columns(3)
-    l1.metric("Decisions logged", f"{counts['logged']:,}")
-    l2.metric("With an outcome", f"{counts['with_outcome']:,}")
-    l3.metric("Verdicts from people", f"{counts['verdicts']:,}")
-    st.caption(
-        "On the day this was built the middle number was zero, and that was the "
-        "point: the column exists and waits for reality. Every verdict on rung 3 "
-        "fills it, and the learner there rewrites the rules from it."
-    )
-
     st.markdown("**What is in the predictions table right now**")
     recent = data_mod.read_predictions(conn)
     if recent.empty:
@@ -735,6 +723,57 @@ def rung_production(df: pd.DataFrame, spec: model_mod.Spec,
             "This table is the audit trail. Someone who was not in the room can read "
             "what the model said, when, and under which version -- without running "
             "any of this code."
+        )
+
+    st.markdown("**How much of the loop has closed**")
+    counts = data_mod.loop_counts(conn)
+    l1, l2, l3 = st.columns(3)
+    l1.metric("Decisions logged", f"{counts['logged']:,}")
+    l2.metric("With an outcome", f"{counts['with_outcome']:,}")
+    l3.metric("Verdicts from people", f"{counts['verdicts']:,}")
+    st.caption(
+        "On the day this was built the middle number was zero, and that was the "
+        "point: the column exists and waits for reality. Every verdict on rung 3 "
+        "fills it, and the learner there rewrites the rules from it."
+    )
+
+    st.markdown("**Rules history -- what the learner and the console have published**")
+    versions = rules_store.history(conn)
+    if not versions:
+        st.info("No Supabase connection, so no history: the rules are ladder.toml's v1.")
+    else:
+        shown = pd.DataFrame(versions)
+        st.dataframe(
+            shown[[c for c in ("version", "source", "rationale", "active", "created_at")
+                   if c in shown.columns]],
+            width="stretch", hide_index=True,
+        )
+        if len(versions) >= 2 and versions[0].get("bands") is not None:
+            newest = rules_store.from_row(versions[0])
+            previous = rules_store.from_row(versions[1])
+            for line in learner_mod._diff(previous, newest.bands):
+                st.markdown(f"- v{previous.version} -> v{newest.version}: {line}")
+        st.caption(
+            "Every row is a decision someone can audit: who changed the rules, from "
+            "what evidence, and when. The model was never touched -- ten verdicts "
+            "move a rule, a retrain needs thousands of outcomes."
+        )
+
+    st.markdown("**Latest verdicts from people**")
+    verdicts = data_mod.read_feedback(conn, limit=10)
+    if not verdicts:
+        st.info("No feedback yet. Rung 3 collects it under every recommendation.")
+    else:
+        frame = pd.DataFrame(verdicts[::-1])
+        columns = ("created_at", "record_id", "recommended_action", "verdict",
+                   "actual_outcome", "better_action", "rules_version")
+        st.dataframe(
+            frame[[c for c in columns if c in frame.columns]],
+            width="stretch", hide_index=True,
+        )
+        st.caption(
+            "This is the input the learner reads: the recommendation, what a person "
+            "said about it, and what actually happened."
         )
 
 
