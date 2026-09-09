@@ -2,7 +2,7 @@
 
 Rung 1  describe   -- the dashboard, reading records out of Supabase
 Rung 2  predict    -- a model, its baseline, and the leakage story
-Rung 3  recommend  -- bands from ladder.toml, and Claude as the second opinion
+Rung 3  recommend  -- bands from ladder.toml, and gpt-oss-120b as the second opinion
 Rung 4  production -- write the predictions back to a table, and deploy
 
 Nothing here is dataset-specific: every number and every column name in the
@@ -253,10 +253,10 @@ def rung_recommend(df: pd.DataFrame, spec: model_mod.Spec) -> None:
         st.success(rules.action)
         st.caption(rules.reason)
     with right:
-        st.markdown("##### Claude, second opinion")
+        st.markdown("##### gpt-oss-120b on Groq, second opinion")
         if not agent_mod.llm_available():
             st.info(
-                "ANTHROPIC_API_KEY is not set, so only the rules layer is running. "
+                "GROQ_API_KEY is not set, so only the rules layer is running. "
                 "That is the honest state of the demo, not a failure."
             )
         elif st.button("Ask the agent", type="secondary"):

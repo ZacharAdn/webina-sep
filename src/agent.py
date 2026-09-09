@@ -10,8 +10,9 @@ a band's floor or its action text and rerunning is the live-fix moment: the
 recommendation flips while everyone watches, and no Python was touched.
 
 Bands.recommend always works, offline, with no key.
-recommend_llm is the optional second opinion; without ANTHROPIC_API_KEY it
-returns None and the app says so instead of pretending.
+recommend_llm is the optional second opinion, served by gpt-oss-120b on Groq
+over its OpenAI-compatible endpoint; without GROQ_API_KEY it returns None and
+the app says so instead of pretending.
 """
 
 from __future__ import annotations
@@ -22,7 +23,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_MODEL = "claude-opus-5"
+DEFAULT_MODEL = "openai/gpt-oss-120b"
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -30,7 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 class Recommendation:
     action: str
     reason: str
-    source: str            # "rules" or "claude"
+    source: str            # "rules" or "groq"
     unknowns: str = ""
 
 
@@ -77,18 +79,25 @@ class Bands:
 
 
 def llm_available() -> bool:
-    return bool(os.environ.get("ANTHROPIC_API_KEY"))
+    return bool(os.environ.get("GROQ_API_KEY"))
 
 
 def recommend_llm(record: dict, rules: Recommendation,
                   model: str = DEFAULT_MODEL) -> Recommendation | None:
-    """Ask Claude for a second opinion. Returns None when it cannot run."""
+    """Ask gpt-oss-120b for a second opinion. Returns None when it cannot run.
+
+    Groq speaks the OpenAI wire format, so the OpenAI SDK pointed at
+    GROQ_BASE_URL is the whole integration. reasoning_effort is a gpt-oss knob
+    and json_object mode is what keeps the reply parseable without a retry.
+    """
     if not llm_available():
         return None
     try:
-        import anthropic
+        from openai import OpenAI
 
-        client = anthropic.Anthropic()
+        client = OpenAI(
+            api_key=os.environ["GROQ_API_KEY"], base_url=GROQ_BASE_URL
+        )
         prompt = (
             "You are advising a retention team. Here is one record:\n"
             f"{json.dumps(record, default=str, ensure_ascii=False)}\n\n"
@@ -98,22 +107,23 @@ def recommend_llm(record: dict, rules: Recommendation,
             "(what this data does not tell you and would change the answer). "
             "Do not invent facts that are not in the record."
         )
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=model,
             max_tokens=500,
-            output_config={"effort": "low"},
+            reasoning_effort="low",
+            response_format={"type": "json_object"},
             messages=[{"role": "user", "content": prompt}],
         )
-        if response.stop_reason == "refusal":
+        text = (response.choices[0].message.content or "").strip()
+        if not text:
             return None
-        text = "".join(b.text for b in response.content if b.type == "text").strip()
         if text.startswith("```"):
             text = text.split("```")[1].removeprefix("json").strip()
         payload = json.loads(text)
         return Recommendation(
             action=str(payload.get("action", "")).strip(),
             reason=str(payload.get("reason", "")).strip(),
-            source="claude",
+            source="groq",
             unknowns=str(payload.get("unknowns", "")).strip(),
         )
     except Exception:  # noqa: BLE001 -- on stage a failure must not stop the demo
