@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import agent as agent_mod  # noqa: E402
 import data as data_mod  # noqa: E402
+import handoff  # noqa: E402
 import insights as insights_mod  # noqa: E402
 import learner as learner_mod  # noqa: E402
 import model as model_mod  # noqa: E402
@@ -288,11 +289,13 @@ def scoring_form(df: pd.DataFrame, spec: model_mod.Spec) -> None:
         )
         derived.append("total_charges")
 
-    bands = agent_mod.Bands.load()
+    bands = agent_mod.Bands.load(conn=data_mod.get_connection())
     left, right = st.columns(2)
+    probabilities: dict[str, float] = {}
     for slot, estimator in ((left, "logreg"), (right, "tree")):
         trained = get_model_for(df, spec, estimator)
         probability = model_mod.score_record(trained, record)
+        probabilities[estimator] = probability
         slot.metric(
             model_mod.ESTIMATORS.get(estimator, estimator),
             f"{probability:.1%}",
@@ -305,6 +308,10 @@ def scoring_form(df: pd.DataFrame, spec: model_mod.Spec) -> None:
         "size of the uncertainty -- and neither number is more true than the "
         "other because it is larger."
     )
+
+    typed = {column: record[column] for column in drivers + numbers}
+    handoff.stash_scored(st.session_state, record, probabilities, typed)
+    st.caption("This customer is now the one rung 3 opens on.")
 
     filled = {
         column: value
@@ -367,10 +374,41 @@ def rung_recommend(df: pd.DataFrame, spec: model_mod.Spec) -> None:
         f"{row[spec.id_column]} · risk {row['probability']:.0%}"
         for _, row in top.iterrows()
     ]
-    choice = st.selectbox(
-        "Pick a record", range(len(labels)), format_func=lambda i: labels[i]
-    )
-    record = top.iloc[choice].to_dict()
+    default = handoff.default_record(st.session_state, spec.estimator, spec.id_column)
+    if default is not None:
+        stash = st.session_state[handoff.KEY]
+        st.markdown("**The customer you scored on rung 2**")
+        typed = stash["typed"]
+        st.dataframe(
+            pd.DataFrame({"field": list(typed), "value": [typed[c] for c in typed]}),
+            width="stretch", hide_index=True,
+        )
+        shown = stash["probability"]
+        st.caption(
+            " · ".join(f"{model_mod.ESTIMATORS.get(k, k)} {v:.1%}" for k, v in shown.items())
+            + f" · the recommender reads {model_mod.ESTIMATORS.get(spec.estimator, spec.estimator)}."
+        )
+        with st.expander("Or pick one of the 25 highest-risk customers in the table"):
+            st.caption(
+                "Walking real customers one at a time is how you find out whether "
+                "the bands are right. It is the way to formulate the rules the agent "
+                "will act on, not only to read them."
+            )
+            use_table = st.checkbox("Use a customer from the table instead", value=False)
+            choice = st.selectbox(
+                "Pick a record", range(len(labels)),
+                format_func=lambda i: labels[i], disabled=not use_table,
+            )
+        record = top.iloc[choice].to_dict() if use_table else default
+    else:
+        st.caption(
+            "Nothing scored on rung 2 yet -- score a customer there and it opens "
+            "here first. Until then, pick one of the 25 highest-risk customers."
+        )
+        choice = st.selectbox(
+            "Pick a record", range(len(labels)), format_func=lambda i: labels[i]
+        )
+        record = top.iloc[choice].to_dict()
 
     rules = bands.recommend(record)
     left, right = st.columns(2)
