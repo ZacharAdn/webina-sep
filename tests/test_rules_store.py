@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import sys
 from pathlib import Path
 
@@ -53,3 +55,25 @@ def test_history_rows_carry_bands_so_rung_4_can_show_before_and_after(monkeypatc
         def table(self, name): return Q()
     rows = rules_store.history(Conn())
     assert rows and "bands" in rows[0]
+
+
+def test_history_rows_carry_the_bands():
+    """Rung 4 shows before/after between the last two versions; it needs the bands."""
+    import os, tomllib
+
+    secrets = ROOT / ".streamlit" / "secrets.toml"
+    if not secrets.exists():
+        pytest.skip("no secrets.toml -- no live rules table to read")
+    for key, value in tomllib.loads(secrets.read_text()).items():
+        if isinstance(value, str):
+            os.environ.setdefault(key, value)
+    import data as data_mod
+    conn = data_mod.get_connection()
+    if conn is None:
+        pytest.skip("no Supabase connection")
+
+    rows = rules_store.history(conn, limit=2)
+
+    assert rows, "rules v1 was seeded by the migration"
+    assert "bands" in rows[0]
+    assert rules_store.from_row(rows[0]).bands  # parses either list or JSON string
