@@ -114,17 +114,23 @@ def history(conn, limit: int = 10) -> list[dict]:
 
 def publish(conn, bands: tuple[Band, ...], source: str, rationale: str,
             evidence: dict | None = None) -> RuleSet:
-    """Write the next version and make it the active one. Returns what was written."""
+    """Write the next version and make it the active one. Returns what was written.
+
+    The table itself refuses anonymous writes; a publish goes through the database
+    function `publish_rules`, which checks a token before it touches anything. So a
+    client that has the connection but not the token - any visitor, or a stale copy
+    of this app - cannot replace the rules the room is looking at.
+    """
+    import access
+
     current = load_active(conn)
-    version = current.version + 1
     payload = {
-        "version": version,
-        "bands": [asdict(b) for b in bands],
-        "rationale": rationale,
-        "source": source,
-        "evidence": evidence or {},
-        "active": True,
+        "p_bands": [asdict(b) for b in bands],
+        "p_source": source,
+        "p_rationale": rationale,
+        "p_evidence": evidence or {},
+        "p_token": access.publish_token(),
     }
-    conn.table(RULES_TABLE).update({"active": False}).eq("active", True).execute()
-    conn.table(RULES_TABLE).insert(payload).execute()
+    result = conn.client.rpc("publish_rules", payload).execute()
+    version = int(result.data if isinstance(result.data, int) else current.version + 1)
     return RuleSet(version, bands, source, rationale)

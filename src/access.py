@@ -80,6 +80,15 @@ def is_editor() -> bool:
     return hmac.compare_digest(str(supplied).strip(), expected)
 
 
+def publish_token() -> str:
+    """What the database asks for before it will replace the rules.
+
+    Same value the URL must carry, so one secret governs both sides: the app will
+    not draw the button, and the database will not honour the write.
+    """
+    return _expected_key()
+
+
 @st.cache_resource
 def _chat_meter() -> dict:
     """Shared across every session in this app process; resets on reboot."""
