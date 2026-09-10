@@ -47,3 +47,6 @@ data/predictions.csv
 # playwright-mcp artefacts, never part of the repo
 .playwright-mcp/
 *.png
+
+# Supabase CLI scratch - carries the project ref and the org id
+supabase/.temp/

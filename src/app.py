@@ -36,6 +36,7 @@ import data as data_mod  # noqa: E402
 import handoff  # noqa: E402
 import insights as insights_mod  # noqa: E402
 import learner as learner_mod  # noqa: E402
+import access
 import rules_chat  # noqa: E402
 import model as model_mod  # noqa: E402
 import rules_store  # noqa: E402
@@ -517,7 +518,14 @@ def rules_chat_panel(conn, rules_set, feedback: list[dict], record: dict,
 
     prompt = st.chat_input("Ask about the rules, or say what should change")
     if prompt:
-        st.session_state["rules_chat"].append({"role": "user", "content": prompt})
+        allowed, reason = access.chat_allowed()
+        if not allowed:
+            st.info(reason)
+            return
+        access.note_chat_call()
+        st.session_state["rules_chat"].append(
+            {"role": "user", "content": access.clean_text(prompt, 500) or ""}
+        )
         digest_rows = (
             [d.as_row() for d in learner_mod.digest(rules_set, feedback).values()]
             if feedback else []
@@ -563,6 +571,10 @@ def rules_chat_panel(conn, rules_set, feedback: list[dict], record: dict,
     if conn is None:
         st.warning("No Supabase connection -- the proposal can be seen but not applied.")
         return
+    if not access.is_editor():
+        st.button(f"Apply as v{rules_set.version + 1}", disabled=True, key="chat_apply_locked")
+        st.caption(access.LOCKED_NOTE)
+        return
     if st.button(f"Apply as v{rules_set.version + 1}", type="primary", key="chat_apply"):
         published = rules_store.publish(
             conn, proposal["bands"], "chat:groq", proposal["rationale"],
@@ -602,8 +614,8 @@ def feedback_form(conn, record: dict, rules, rules_set, spec) -> None:
             "recommended_action": rules.action,
             "verdict": verdict,
             "actual_outcome": outcome,
-            "better_action": better.strip() or None,
-            "note": note.strip() or None,
+            "better_action": access.clean_text(better),
+            "note": access.clean_text(note),
             "rules_version": rules_set.version,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -655,6 +667,11 @@ def learner_panel(conn, rules_set, feedback: list[dict]) -> None:
 
     if conn is None:
         st.warning("No Supabase connection -- the revision can be seen but not published.")
+        return
+    if not access.is_editor():
+        st.button(f"Publish v{proposal.before.version + 1} -- the recommender uses it from now on",
+                  disabled=True, key="publish_locked")
+        st.caption(access.LOCKED_NOTE)
         return
     if st.button(f"Publish v{proposal.before.version + 1} -- the recommender uses it from now on",
                  type="secondary"):

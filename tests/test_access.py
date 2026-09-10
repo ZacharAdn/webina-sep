@@ -1,0 +1,85 @@
+"""The gate: strangers may read, score, chat and send verdicts; only the owner publishes."""
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+import access  # noqa: E402
+
+
+class FakeQueryParams(dict):
+    pass
+
+
+@pytest.fixture(autouse=True)
+def clean(monkeypatch):
+    import streamlit as st
+    st.session_state.clear()
+    access._chat_meter.clear()
+    monkeypatch.setattr(st, "query_params", FakeQueryParams(), raising=False)
+    yield
+    st.session_state.clear()
+    access._chat_meter.clear()
+
+
+def _set_key(monkeypatch, value):
+    monkeypatch.setattr(access, "_expected_key", lambda: value)
+
+
+def _set_url_key(value):
+    import streamlit as st
+    st.query_params[access.KEY_PARAM] = value
+
+
+def test_no_key_configured_means_open(monkeypatch):
+    """A laptop run with no secrets keeps working exactly as before."""
+    _set_key(monkeypatch, "")
+    assert access.is_editor() is True
+
+
+def test_stranger_without_the_key_cannot_publish(monkeypatch):
+    _set_key(monkeypatch, "s3cret")
+    assert access.is_editor() is False
+
+
+def test_wrong_key_cannot_publish(monkeypatch):
+    _set_key(monkeypatch, "s3cret")
+    _set_url_key("s3cre")
+    assert access.is_editor() is False
+
+
+def test_owner_with_the_key_can_publish(monkeypatch):
+    _set_key(monkeypatch, "s3cret")
+    _set_url_key("s3cret")
+    assert access.is_editor() is True
+
+
+def test_chat_budget_runs_out_per_session(monkeypatch):
+    for _ in range(access.SESSION_CHAT_BUDGET):
+        allowed, _ = access.chat_allowed()
+        assert allowed
+        access.note_chat_call()
+    allowed, reason = access.chat_allowed()
+    assert allowed is False
+    assert "session" in reason
+
+
+def test_chat_budget_has_an_app_wide_ceiling(monkeypatch):
+    """One visitor cannot burn the key for everyone; the app-wide meter stops it."""
+    monkeypatch.setattr(access, "SESSION_CHAT_BUDGET", 10_000)
+    for _ in range(access.HOURLY_CHAT_BUDGET):
+        allowed, _ = access.chat_allowed()
+        assert allowed
+        access.note_chat_call()
+    allowed, reason = access.chat_allowed()
+    assert allowed is False
+    assert "hour" in reason
+
+
+def test_visitor_text_is_trimmed_and_flattened():
+    assert access.clean_text("  two   words \n here ") == "two words here"
+    assert access.clean_text("x" * 500, limit=200) == "x" * 200
+    assert access.clean_text("") is None
+    assert access.clean_text(None) is None
