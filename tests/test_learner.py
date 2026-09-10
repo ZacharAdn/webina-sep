@@ -116,3 +116,25 @@ def test_three_who_left_after_a_soft_call_lower_the_floor_of_the_band_above(rule
     assert floors["medium"] == pytest.approx(0.35)
     assert "left" in proposal.rationale
     assert proposal.changes == ["high: floor 60% -> 55%"]
+
+
+def test_propose_prefers_a_rule_that_moved_over_a_model_that_shrugged(rules, monkeypatch):
+    """The LLM is a second opinion, not a veto: when the deterministic learner
+    has crossed its threshold and moved a floor, that is the proposal."""
+    feedback = [fb(0.577, "wrong", "left") for _ in range(3)]
+    unchanged = learner.Proposal(rules, rules.bands, "no evidence", "learner:groq", {}, [])
+    monkeypatch.setattr(learner, "propose_llm", lambda *a, **k: unchanged)
+    proposal = learner.propose(rules, feedback, prefer_llm=True)
+    assert proposal.changes == ["high: floor 60% -> 55%"]
+    assert proposal.source == "learner:rules"
+
+
+def test_propose_asks_the_model_only_when_the_rules_find_nothing(rules, monkeypatch):
+    feedback = [fb(0.577, "right", "stayed")]
+    moved = rules_store.normalise([{"name": "high", "min": 0.5, "action": "x"},
+                                   {"name": "medium", "min": 0.35, "action": "y"},
+                                   {"name": "low", "min": 0.0, "action": "z"}])
+    from_model = learner.Proposal(rules, moved, "model says so", "learner:groq", {}, ["high: floor 60% -> 50%"])
+    monkeypatch.setattr(learner, "propose_llm", lambda *a, **k: from_model)
+    assert learner.propose(rules, feedback, prefer_llm=True) is from_model
+    assert learner.propose(rules, feedback, prefer_llm=False).source == "learner:rules"

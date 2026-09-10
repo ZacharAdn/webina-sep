@@ -224,9 +224,17 @@ def propose_llm(rules: RuleSet, feedback: list[dict],
 
 
 def propose(rules: RuleSet, feedback: list[dict], prefer_llm: bool = True) -> Proposal:
-    """The learner the app calls: Groq when it is there and answers well, rules otherwise."""
-    if prefer_llm:
-        got = propose_llm(rules, feedback)
-        if got is not None:
-            return got
-    return propose_rules(rules, feedback)
+    """The learner the app calls. Rules first; the model only when they find nothing.
+
+    The order used to be the other way round, and on stage the model read
+    three verdicts, called them "insufficient consistent data" and shrugged,
+    while the deterministic learner had already crossed its threshold. A rule
+    that fired is evidence counted; a model's opinion is a second reading of
+    the same table. The second reading is worth having only when the first
+    found nothing.
+    """
+    from_rules = propose_rules(rules, feedback)
+    if from_rules.changed or not prefer_llm:
+        return from_rules
+    got = propose_llm(rules, feedback)
+    return got if got is not None else from_rules

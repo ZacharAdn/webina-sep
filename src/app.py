@@ -628,12 +628,13 @@ def learner_panel(conn, rules_set, feedback: list[dict]) -> None:
         return
 
     prefer_llm = learner_mod.llm_available()
-    writer = "gpt-oss-120b" if prefer_llm else "the rule-based learner"
+    writer = ("the rule-based learner, with gpt-oss-120b as a second opinion when "
+              "the rules find nothing") if prefer_llm else "the rule-based learner"
     if st.button("Let the learner revise the rules", type="primary"):
         with st.spinner("Reading the verdicts..."):
             proposal = learner_mod.propose(rules_set, feedback, prefer_llm=prefer_llm)
         st.session_state["proposal"] = proposal
-    st.caption(f"{len(feedback)} verdicts on rules v{rules_set.version}; {writer} writes the revision.")
+    st.caption(f"{len(feedback)} verdicts on rules v{rules_set.version}; {writer}.")
     with st.expander("What the learner read, folded per band"):
         digested = learner_mod.digest(rules_set, feedback)
         st.dataframe(
