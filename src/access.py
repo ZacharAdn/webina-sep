@@ -14,6 +14,7 @@ who runs out is told plainly; the rest of the page keeps working.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
 import time
@@ -34,12 +35,30 @@ LOCKED_NOTE = (
 )
 
 
-def _expected_key() -> str:
+def _secret(name: str, section: str | None = None) -> str:
     try:
-        value = st.secrets.get("EDITOR_KEY", "")
-    except Exception:  # noqa: BLE001 - no secrets file at all
-        value = ""
-    return str(value or os.environ.get("EDITOR_KEY", "")).strip()
+        block = st.secrets[section] if section else st.secrets
+        return str(block.get(name, "") or "")
+    except Exception:  # noqa: BLE001 - no secrets file, or no such section
+        return ""
+
+
+def _expected_key() -> str:
+    """The value a link must carry in ?k= to publish.
+
+    EDITOR_KEY wins when it is set. Otherwise the key is derived from a secret the
+    deployment already holds, so the gate works without anyone touching the hosting
+    dashboard: the derivation lives in this file, the input does not, and a repo
+    reader cannot reproduce it. Rotating that secret changes the link - which is
+    the safe direction, since the gate then locks rather than opens.
+    """
+    explicit = str(_secret("EDITOR_KEY") or os.environ.get("EDITOR_KEY", "")).strip()
+    if explicit:
+        return explicit
+    seed = _secret("SUPABASE_KEY", "connections.supabase") or _secret("GROQ_API_KEY")
+    if not seed:
+        return ""
+    return hashlib.sha256(f"webina-sep|publish-gate|{seed}".encode()).hexdigest()[:16]
 
 
 def is_editor() -> bool:
