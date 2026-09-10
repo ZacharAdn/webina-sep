@@ -33,10 +33,10 @@ def _set_url_key(value):
     st.query_params[access.KEY_PARAM] = value
 
 
-def test_no_key_configured_means_open(monkeypatch):
-    """A laptop run with no secrets keeps working exactly as before."""
+def test_no_key_configured_fails_closed(monkeypatch):
+    """A deployment that lost its secret goes quiet instead of opening up."""
     _set_key(monkeypatch, "")
-    assert access.is_editor() is True
+    assert access.is_editor() is False
 
 
 def test_stranger_without_the_key_cannot_publish(monkeypatch):

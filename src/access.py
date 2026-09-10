@@ -45,12 +45,13 @@ def _expected_key() -> str:
 def is_editor() -> bool:
     """True when the visitor carries the editor key in the URL.
 
-    With no EDITOR_KEY configured the app is in local/dev mode and everything is
-    open - that keeps `streamlit run` on a laptop working exactly as before.
+    Fails closed on purpose: with no EDITOR_KEY configured nobody can publish.
+    A deployment that lost its secret should go quiet, not hand the live rules to
+    whoever opens the link. Local work puts the key in .streamlit/secrets.toml.
     """
     expected = _expected_key()
     if not expected:
-        return True
+        return False
     try:
         supplied = st.query_params.get(KEY_PARAM, "")
     except Exception:  # noqa: BLE001 - older Streamlit
