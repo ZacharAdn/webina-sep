@@ -113,3 +113,19 @@ def test_chat_key_changes_with_the_customer_and_with_the_rules_version():
     assert same != other_customer
     assert same != other_version
     assert "v1" in same and "rung2:abc123" in same
+
+
+class FailingClient(StubClient):
+    """The provider rejects the call -- what a revoked key looks like."""
+
+    def create(self, **kwargs):
+        raise RuntimeError("Error code: 401 - Invalid API Key")
+
+
+def test_reply_carries_the_providers_error_instead_of_swallowing_it():
+    turn = rules_chat.reply([{"role": "user", "content": "so 15%?"}], "s",
+                            current=V1, client=FailingClient(""))
+    assert turn is not None
+    assert turn.bands is None
+    assert "401" in turn.error
+    assert turn.text == ""

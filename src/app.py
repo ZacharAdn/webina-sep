@@ -403,6 +403,7 @@ def rung_recommend(df: pd.DataFrame, spec: model_mod.Spec) -> None:
 # --------------------------------------------------------------------------
 # The loop -- a verdict on the recommendation, and the agent that learns from it
 # --------------------------------------------------------------------------
+WRITE_BATCH = 25
 OUTCOMES = {"unknown": "don't know yet", "stayed": "stayed", "left": "left"}
 
 
@@ -449,9 +450,11 @@ def rules_chat_panel(conn, rules_set, feedback: list[dict], record: dict,
         system = rules_chat.system_prompt(rules_set, digest_rows, record)
         with st.spinner("Thinking..."):
             turn = rules_chat.reply(st.session_state["rules_chat"], system, current=rules_set)
-        if turn is None:
+        if turn is None or turn.error:
+            reason = turn.error if turn is not None else "GROQ_API_KEY is not set"
             st.session_state["rules_chat"].append(
-                {"role": "assistant", "content": "_No usable answer came back. The rules stand._"}
+                {"role": "assistant",
+                 "content": f"_The model could not answer. {reason}. The rules stand._"}
             )
         else:
             st.session_state["rules_chat"].append({"role": "assistant", "content": turn.text})
@@ -544,48 +547,33 @@ def feedback_form(conn, record: dict, rules, rules_set, spec) -> None:
 
 
 def learner_panel(conn, rules_set, feedback: list[dict]) -> None:
-    """Agent 2. Shows what it read, proposes a revision, and publishes it on request."""
-    st.markdown("##### Agent 2 · the one that learns")
-    st.caption(
-        "It folds every verdict from rung 3 onto the band that produced it and "
-        "rewrites the bands. It never touches the model."
-    )
+    """Agent 2: reads the verdicts, proposes a revision, publishes it on request."""
     if not feedback:
-        st.info("No feedback yet. Send one on rung 3 and this panel wakes up.")
+        st.caption("No verdicts yet. Send one on rung 3 and the learner has something to read.")
         return
 
-    digested = learner_mod.digest(rules_set, feedback)
-    st.dataframe(
-        pd.DataFrame([d.as_row() for d in digested.values()]),
-        width="stretch", hide_index=True,
-    )
-    st.caption(f"{len(feedback)} verdicts read, on rules v{rules_set.version}.")
-
-    prefer_llm = st.toggle(
-        "Let gpt-oss-120b write the revision (the rule-based learner runs otherwise)",
-        value=learner_mod.llm_available(), disabled=not learner_mod.llm_available(),
-    )
+    prefer_llm = learner_mod.llm_available()
+    writer = "gpt-oss-120b" if prefer_llm else "the rule-based learner"
     if st.button("Let the learner revise the rules", type="primary"):
         with st.spinner("Reading the verdicts..."):
             proposal = learner_mod.propose(rules_set, feedback, prefer_llm=prefer_llm)
         st.session_state["proposal"] = proposal
+    st.caption(f"{len(feedback)} verdicts on rules v{rules_set.version}; {writer} writes the revision.")
+    with st.expander("What the learner read, folded per band"):
+        digested = learner_mod.digest(rules_set, feedback)
+        st.dataframe(
+            pd.DataFrame([d.as_row() for d in digested.values()]),
+            width="stretch", hide_index=True,
+        )
 
     proposal = st.session_state.get("proposal")
     if proposal is None or proposal.before.version != rules_set.version:
         return
 
-    st.markdown(f"**Proposal by `{proposal.source}`**")
     st.write(proposal.rationale)
     if not proposal.changed:
         st.info("The evidence does not move any band yet. That is a finding, not a failure.")
         return
-    before = pd.DataFrame(proposal.before.as_rows())
-    after = pd.DataFrame([b.__dict__ for b in proposal.bands])
-    c1, c2 = st.columns(2)
-    c1.markdown(f"v{proposal.before.version} (now)")
-    c1.dataframe(before, width="stretch", hide_index=True)
-    c2.markdown(f"v{proposal.before.version + 1} (proposed)")
-    c2.dataframe(after, width="stretch", hide_index=True)
     for line in proposal.changes:
         st.markdown(f"- {line}")
 
@@ -612,8 +600,8 @@ def rung_production(df: pd.DataFrame, spec: model_mod.Spec,
                     load: data_mod.LoadResult) -> None:
     st.subheader(SUBHEADS[3])
     st.caption(
-        "Production here is a job that writes to a table, a page that reads it, "
-        "and a loop that learns from what comes back."
+        "Three things happen here: a job writes the scores to a table, people "
+        "send verdicts on the recommendations, and a second agent rewrites the rules."
     )
 
     conn = data_mod.get_connection()
@@ -621,17 +609,13 @@ def rung_production(df: pd.DataFrame, spec: model_mod.Spec,
     scored = model_mod.score_records(trained, df, spec, [])
     rules_set = rules_store.load_active(conn)
     bands = agent_mod.Bands.from_rules(rules_set)
+    source = "Supabase" if load.source == "supabase" else "the local CSV"
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Data source", "Supabase" if load.source == "supabase" else "local CSV")
-    c2.metric("Model version", trained.version)
-    c3.metric("Rules version", f"v{rules_set.version}")
-    c4.metric("Records scored", f"{len(scored):,}")
-
-    left, right = st.columns([3, 1])
-    n = left.slider("How many of the riskiest records to write", 5, 100, 25, step=5)
+    st.markdown("**1 · Write the scores**")
+    st.caption(f"Model {trained.version} · rules v{rules_set.version} · "
+               f"{len(scored):,} customers scored from {source}.")
     target = "Supabase" if conn is not None else "the local predictions file"
-    if right.button(f"Score and write to {target}", type="primary"):
+    if st.button(f"Score and write the {WRITE_BATCH} riskiest to {target}", type="primary"):
         now = datetime.now(timezone.utc).isoformat()
         rows = [
             {
@@ -641,43 +625,34 @@ def rung_production(df: pd.DataFrame, spec: model_mod.Spec,
                 "model_version": f"{trained.version} · rules v{rules_set.version}",
                 "created_at": now,
             }
-            for row in scored.head(n).to_dict("records")
+            for row in scored.head(WRITE_BATCH).to_dict("records")
         ]
         ok, message = data_mod.write_predictions(conn, rows)
         (st.success if ok else st.error)(message)
 
     st.divider()
-    st.markdown("**The loop**")
+    st.markdown("**2 · Learn from what came back**")
     counts = data_mod.loop_counts(conn)
-    l1, l2, l3 = st.columns(3)
-    l1.metric("Decisions logged", f"{counts['logged']:,}")
-    l2.metric("With an outcome", f"{counts['with_outcome']:,}")
-    l3.metric("Verdicts from people", f"{counts['verdicts']:,}")
-    st.caption(
-        "Every verdict on rung 3 fills the middle number; the learner below "
-        "rewrites the rules from it."
-    )
+    st.caption(f"{counts['logged']:,} decisions logged · "
+               f"{counts['verdicts']:,} verdicts from people on rung 3.")
     feedback = data_mod.read_feedback(conn)
     learner_panel(conn, rules_set, feedback)
 
     st.divider()
-    st.markdown("**Rules history**")
-    versions = rules_store.history(conn)
+    st.markdown("**3 · Who changed the rules, and when**")
+    versions = rules_store.history(conn, limit=5)
     if not versions:
-        st.info("No Supabase connection, so no history: the rules are ladder.toml's v1.")
+        st.caption("No Supabase connection, so no history: the rules are ladder.toml's v1.")
     else:
-        shown = pd.DataFrame(versions)
-        st.dataframe(
-            shown[[c for c in ("version", "source", "rationale", "active", "created_at")
-                   if c in shown.columns]],
-            width="stretch", hide_index=True,
-        )
+        for row in versions:
+            when = str(row.get("created_at", ""))[:16].replace("T", " ")
+            st.markdown(f"- v{row['version']} · {row.get('source', '')} · {when} -- "
+                        f"{row.get('rationale', '') or 'initial bands from ladder.toml'}")
         if len(versions) >= 2 and versions[0].get("bands") is not None:
             newest = rules_store.from_row(versions[0])
             previous = rules_store.from_row(versions[1])
             for line in learner_mod._diff(previous, newest.bands):
-                st.markdown(f"- v{previous.version} -> v{newest.version}: {line}")
-        st.caption("Who changed the rules, from what evidence, and when. The model was never touched.")
+                st.caption(f"v{previous.version} -> v{newest.version}: {line}")
 
     with st.expander("Audit trail -- the predictions table"):
         recent = data_mod.read_predictions(conn)

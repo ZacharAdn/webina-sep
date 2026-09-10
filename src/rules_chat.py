@@ -27,6 +27,7 @@ class ChatTurn:
     text: str
     bands: tuple[Band, ...] | None = None
     rationale: str = ""
+    error: str = ""
 
 
 def chat_key(rules: RuleSet, record_id: str) -> str:
@@ -121,9 +122,9 @@ def reply(history: list[dict], system: str, current: RuleSet | None = None,
             messages=[{"role": "system", "content": system}, *history],
         )
         text = (response.choices[0].message.content or "").strip()
-    except Exception:  # noqa: BLE001 -- on stage a failure must not stop the demo
-        return None
+    except Exception as exc:  # noqa: BLE001 -- on stage a failure must not stop the demo
+        return ChatTurn("", error=str(exc))
     if not text:
-        return None
+        return ChatTurn("", error="the model returned an empty reply")
     bands, rationale = extract_bands(text, current)
     return ChatTurn(strip_block(text), bands, rationale)
