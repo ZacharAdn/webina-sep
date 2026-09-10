@@ -54,3 +54,13 @@ python ladder.py all                # rungs 1-4, stopping at every gate
 python ladder.py all --auto --local-only   # rungs 1-3 unattended, then the report
 streamlit run src/app.py            # the four rungs on http://localhost:8501
 ```
+
+## The model is a file
+
+`python ladder.py model` writes `models/logreg.joblib` and `models/tree.joblib`
+(committed, about 10KB each). The app loads the file and trains only when it
+is missing or will not unpickle. The version string is a fingerprint of the
+model's test-set probabilities, so it changes exactly when the answers do.
+After a change to any module other than `src/app.py`, the live app needs a
+Reboot from the Streamlit dashboard: Cloud reruns the script but keeps the
+old modules in memory.

@@ -1,9 +1,9 @@
-# webina-sep — ladder report, 2026-09-09 22:02
+# webina-sep — ladder report, 2026-09-10 13:22
 
 | Rung | Status | Measured |
 |---|---|---|
 | 1 prepare | PASS | 7,043 rows · 21 columns · 11 NULLs in total_charges · 26.5% positive |
-| 2 model | PASS | baseline 73.5% acc / 0% recall · model 79.3% / 52.1% / AUC 0.84 · leak 93.7% vs 48.4% |
+| 2 model | PASS | baseline 73.5% acc / 0% recall · model 79.3% / 52.1% / AUC 0.84 · leak 93.7% vs 48.4% · saved models/logreg.joblib (logreg-e8ac3263) |
 | 3 app | PASS | 4 rungs · 0 exceptions · 25 rows to Supabase |
 | 4 supabase | PASS | ref REDACTED-PROJECT-REF · 7,043 rows · 11 NULLs kept |
 | 5 github | PASS | ZacharAdn/webina-sep (public) |

@@ -13,8 +13,10 @@ contract type against churn. Here each becomes a question asked of the data:
 
 from __future__ import annotations
 
+import math
 import re
 
+import numpy as np
 import pandas as pd
 from pandas.api import types as ptypes
 
@@ -138,3 +140,82 @@ def discriminative_categoricals(df: pd.DataFrame, target_column: str,
             }
         )
     return sorted(ranked, key=lambda r: -r["spread"])[:k]
+
+
+# --------------------------------------------------------------------------
+# What moves with the target -- the rung-1 story charts
+# --------------------------------------------------------------------------
+def _event(df: pd.DataFrame, target_column: str, positive_label: str) -> pd.Series:
+    return (df[target_column].astype(str).str.strip() == positive_label).astype(int)
+
+
+def _cramers_v(series: pd.Series, event: pd.Series) -> float:
+    """Association between a categorical column and a yes/no target, 0 to 1."""
+    table = pd.crosstab(series, event)
+    if table.shape[0] < 2 or table.shape[1] < 2:
+        return 0.0
+    observed = table.to_numpy(dtype=float)
+    total = observed.sum()
+    expected = np.outer(observed.sum(axis=1), observed.sum(axis=0)) / total
+    chi2 = float(((observed - expected) ** 2 / expected).sum())
+    return math.sqrt(chi2 / (total * (min(table.shape) - 1)))
+
+
+def associations(df: pd.DataFrame, target_column: str, positive_label: str,
+                 id_column: str, categorical_int_max_unique: int) -> list[dict]:
+    """Every column ranked by how strongly it moves with the target.
+
+    Point-biserial correlation for a measurement, Cramér's V for a category:
+    both run 0 to 1, so one bar chart can hold the whole table. Columns that
+    are identifiers (more distinct values than MAX_CATEGORIES) are skipped.
+    """
+    event = _event(df, target_column, positive_label)
+    numeric, categorical = split_columns(
+        df, id_column, target_column, categorical_int_max_unique
+    )
+    rows = []
+    for column in numeric:
+        series = df[column]
+        if series.nunique(dropna=True) < 2:
+            continue
+        strength = abs(float(series.corr(event)))
+        rows.append({"column": column, "kind": "numeric",
+                     "strength": 0.0 if math.isnan(strength) else strength})
+    for column in categorical:
+        series = df[column].astype(str)
+        if not 2 <= series.nunique(dropna=True) <= MAX_CATEGORIES:
+            continue
+        rows.append({"column": column, "kind": "categorical",
+                     "strength": _cramers_v(series, event)})
+    return sorted(rows, key=lambda r: -r["strength"])
+
+
+def numeric_separation(df: pd.DataFrame, target_column: str, positive_label: str,
+                       numeric: list[str]) -> list[dict]:
+    """Measurements ranked by how far apart the two groups sit on them.
+
+    `effect` is the gap between the medians in units of the column's spread,
+    so tenure (0 to 72) and monthly charges (18 to 118) compare fairly.
+    """
+    event = _event(df, target_column, positive_label).astype(bool)
+    rows = []
+    for column in numeric:
+        series = pd.to_numeric(df[column], errors="coerce")
+        spread = float(series.std(ddof=0)) or 1.0
+        positive = float(series[event].median())
+        negative = float(series[~event].median())
+        rows.append({
+            "column": column,
+            "median_positive": positive,
+            "median_negative": negative,
+            "effect": abs(positive - negative) / spread,
+        })
+    return sorted(rows, key=lambda r: -r["effect"])
+
+
+def correlation_matrix(df: pd.DataFrame, target_column: str, positive_label: str,
+                       numeric: list[str]) -> pd.DataFrame:
+    """Pearson correlations among the measurements, with the target as 0/1."""
+    frame = df[numeric].apply(pd.to_numeric, errors="coerce")
+    frame[target_column] = _event(df, target_column, positive_label)
+    return frame.corr()

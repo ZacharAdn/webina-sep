@@ -23,11 +23,13 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+APP_ROOT = Path(__file__).resolve().parents[1]
 
 import agent as agent_mod  # noqa: E402
 import data as data_mod  # noqa: E402
@@ -65,6 +67,11 @@ def get_model_for(df: pd.DataFrame, _spec: model_mod.Spec,
     handed back the same pipeline twice, with no error and no warning. The
     plain string is what makes the two calls distinct.
     """
+    path = model_mod.model_path(APP_ROOT, estimator)
+    loaded = model_mod.load_model(path)
+    if loaded is not None:
+        loaded.origin = str(path.relative_to(APP_ROOT))
+        return loaded
     return model_mod.train_model(df, replace(_spec, estimator=estimator))
 
 
@@ -111,13 +118,10 @@ def rung_describe(df: pd.DataFrame, spec: model_mod.Spec) -> None:
     numeric, _ = insights_mod.split_columns(
         df, spec.id_column, spec.target, spec.categorical_int_max_unique
     )
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Records", f"{len(df):,}")
-    c2.metric(f"{spec.positive_label} rate", f"{positive_rate:.1%}")
-    c3.metric("Columns with NULLs", len(missing))
-    if numeric:
-        c4.metric(f"Median {numeric[0]}", f"{df[numeric[0]].median():,.0f}")
+    st.caption(
+        f"{len(df):,} records · {positive_rate:.1%} are '{spec.positive_label}' · "
+        f"{len(missing)} column{'s' if len(missing) != 1 else ''} with NULLs."
+    )
 
     st.markdown("**One: the split is uneven, and that decides the whole evening.**")
     counts = df[spec.target].value_counts().reset_index()
@@ -136,63 +140,135 @@ def rung_describe(df: pd.DataFrame, spec: model_mod.Spec) -> None:
         "That is rung 2's problem, and it starts here."
     )
 
-    st.markdown("**Two: what is missing, and what the blanks were hiding.**")
-    if not missing:
-        st.write("No column has a NULL. That is rarer than it sounds -- say so out loud.")
-    else:
-        top = missing[0]
-        explanation = insights_mod.explains_missing(df, top["column"])
-        sentence = (
-            f"{top['nulls']} records have no {top['column']} "
-            f"({top['share']:.1%} of the table)."
+    st.markdown(f"**Two: what moves with {spec.target}.**")
+    linked = insights_mod.associations(
+        df, spec.target, spec.positive_label, spec.id_column,
+        spec.categorical_int_max_unique,
+    )
+    if linked:
+        frame = pd.DataFrame(linked)
+        figure = px.bar(
+            frame, x="strength", y="column", color="kind", orientation="h",
+            color_discrete_map={"numeric": ACCENT, "categorical": CONTRA},
+            title=f"How strongly each column moves with {spec.target} (0 = not at all)",
+            category_orders={"column": frame["column"].tolist()},
         )
-        if explanation:
-            sentence += (
-                f" Every one of them has {explanation['column']} = "
-                f"{explanation['value']} -- the blank is a fact about those rows, "
-                "not a data error. The mistake is to coerce it to zero."
-            )
-        st.write(sentence)
-        st.dataframe(
-            df[df[top["column"]].isna()].head(25),
-            width="stretch", hide_index=True,
+        figure.update_yaxes(autorange="reversed")   # strongest on top
+        st.plotly_chart(figure, width="stretch")
+        top = linked[0]
+        st.caption(
+            f"{top['column']} carries the most signal ({top['strength']:.2f}); "
+            f"{linked[-1]['column']} carries almost none ({linked[-1]['strength']:.2f}). "
+            "Correlation for a measurement, Cramér's V for a category, so one "
+            "chart can hold the whole table."
         )
-        if len(missing) > 1:
-            st.caption(
-                "Other columns with NULLs: "
-                + ", ".join(f"{m['column']} ({m['nulls']})" for m in missing[1:])
-            )
 
-    st.markdown("**Three: who goes with whom.**")
+    separated = insights_mod.numeric_separation(
+        df, spec.target, spec.positive_label, numeric
+    )[:3]
+    if separated:
+        st.markdown("**Three: where the two groups sit on the measurements.**")
+        columns = st.columns(len(separated))
+        for slot, row in zip(columns, separated):
+            slot.plotly_chart(
+                px.histogram(
+                    df, x=row["column"], color=spec.target, barmode="overlay",
+                    histnorm="percent", nbins=30, opacity=0.65,
+                    color_discrete_sequence=[ACCENT, CONTRA],
+                    title=row["column"],
+                ),
+                width="stretch",
+            )
+        first = separated[0]
+        st.caption(
+            f"Median {first['column']}: {first['median_positive']:,.0f} for "
+            f"'{spec.positive_label}' against {first['median_negative']:,.0f} for the rest. "
+            "Each bar is a share of its own group, so the two shapes compare "
+            "even though the groups differ in size."
+        )
+
+    st.markdown("**Four: who goes with whom.**")
     ranked = insights_mod.discriminative_categoricals(
-        df, spec.target, spec.positive_label, k=3
+        df, spec.target, spec.positive_label, k=2
     )
     if not ranked:
         st.write("No categorical column separates the two groups. That is a finding.")
-        return
-    for row in ranked:
-        rates = (
-            pd.DataFrame(
-                {"value": list(row["rates"]), "rate": list(row["rates"].values())}
+    else:
+        columns = st.columns(len(ranked))
+        for slot, row in zip(columns, ranked):
+            rates = (
+                pd.DataFrame(
+                    {"value": list(row["rates"]), "rate": list(row["rates"].values())}
+                )
+                .sort_values("rate", ascending=False)
             )
-            .sort_values("rate", ascending=False)
+            slot.plotly_chart(
+                px.bar(
+                    rates, x="value", y="rate",
+                    color_discrete_sequence=[ACCENT],
+                    title=f"'{spec.positive_label}' rate by {row['column']}",
+                ),
+                width="stretch",
+            )
+        first = ranked[0]
+        hi = max(first["rates"], key=first["rates"].get)
+        lo = min(first["rates"], key=first["rates"].get)
+        st.caption(
+            f"{first['column']} = {hi} is at {first['rates'][hi]:.0%}; {lo} is at "
+            f"{first['rates'][lo]:.0%} -- a spread of {first['spread']:.0%}. That gap is "
+            "why rung 3's bands are worth setting at all."
+        )
+
+    if len(numeric) >= 2:
+        st.markdown("**Five: what is correlated with what.**")
+        matrix = insights_mod.correlation_matrix(
+            df, spec.target, spec.positive_label, numeric
         )
         st.plotly_chart(
-            px.bar(
-                rates, x="value", y="rate",
-                color_discrete_sequence=[ACCENT],
-                title=f"'{spec.positive_label}' rate by {row['column']}",
+            px.imshow(
+                matrix, text_auto=".2f", zmin=-1, zmax=1,
+                color_continuous_scale="RdBu",
+                title="Pearson correlation; the target is 0/1",
             ),
             width="stretch",
         )
-    first = ranked[0]
-    hi = max(first["rates"], key=first["rates"].get)
-    lo = min(first["rates"], key=first["rates"].get)
-    st.caption(
-        f"{first['column']} = {hi} is at {first['rates'][hi]:.0%}; {lo} is at "
-        f"{first['rates'][lo]:.0%} -- a spread of {first['spread']:.0%}. That gap is "
-        "why rung 3's bands are worth setting at all."
-    )
+        off = matrix.where(~pd.DataFrame(
+            np.eye(len(matrix), dtype=bool),
+            index=matrix.index, columns=matrix.columns,
+        ))
+        pair = off.drop(columns=spec.target).drop(index=spec.target).abs().stack().idxmax()
+        st.caption(
+            f"{pair[0]} and {pair[1]} move together "
+            f"({matrix.loc[pair[0], pair[1]]:.2f}); the model does not need both. "
+            f"The last column is what each measurement does to {spec.target}."
+        )
+
+    with st.expander("What is missing, and what the blanks were hiding"):
+        if not missing:
+            st.write("No column has a NULL. That is rarer than it sounds -- say so out loud.")
+        else:
+            top = missing[0]
+            explanation = insights_mod.explains_missing(df, top["column"])
+            sentence = (
+                f"{top['nulls']} records have no {top['column']} "
+                f"({top['share']:.1%} of the table)."
+            )
+            if explanation:
+                sentence += (
+                    f" Every one of them has {explanation['column']} = "
+                    f"{explanation['value']} -- the blank is a fact about those rows, "
+                    "not a data error. The mistake is to coerce it to zero."
+                )
+            st.write(sentence)
+            st.dataframe(
+                df[df[top["column"]].isna()].head(25),
+                width="stretch", hide_index=True,
+            )
+            if len(missing) > 1:
+                st.caption(
+                    "Other columns with NULLs: "
+                    + ", ".join(f"{m['column']} ({m['nulls']})" for m in missing[1:])
+                )
 
 
 # --------------------------------------------------------------------------
@@ -612,8 +688,8 @@ def rung_production(df: pd.DataFrame, spec: model_mod.Spec,
     source = "Supabase" if load.source == "supabase" else "the local CSV"
 
     st.markdown("**1 · Write the scores**")
-    st.caption(f"Model {trained.version} · rules v{rules_set.version} · "
-               f"{len(scored):,} customers scored from {source}.")
+    st.caption(f"Model {trained.version} from {getattr(trained, 'origin', 'this process')} · "
+               f"rules v{rules_set.version} · {len(scored):,} customers scored from {source}.")
     target = "Supabase" if conn is not None else "the local predictions file"
     if st.button(f"Score and write the {WRITE_BATCH} riskiest to {target}", type="primary"):
         now = datetime.now(timezone.utc).isoformat()

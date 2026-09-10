@@ -17,11 +17,13 @@ from a fresh clone with nothing but src/ on the path.
 
 from __future__ import annotations
 
+import hashlib
 import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import joblib
 import pandas as pd
 from pandas.api import types as ptypes
 from sklearn.compose import ColumnTransformer
@@ -127,6 +129,7 @@ class TrainedModel:
     numeric: list[str] = field(default_factory=list)
     categorical: list[str] = field(default_factory=list)
     version: str = MODEL_VERSION
+    origin: str = "trained in this process"
 
 
 def split_columns(df: pd.DataFrame, spec: Spec) -> tuple[list[str], list[str]]:
@@ -251,8 +254,51 @@ def train_model(df: pd.DataFrame, spec: Spec) -> TrainedModel:
         baseline=baseline,
         numeric=numeric,
         categorical=categorical,
-        version=f"{spec.estimator}-v1",
+        version=f"{spec.estimator}-{_fingerprint(pipeline, x_test)}",
     )
+
+
+def _fingerprint(pipeline: Pipeline, x_test: pd.DataFrame) -> str:
+    """Eight hex characters that change exactly when the model's answers do.
+
+    A constant "v1" told the predictions table nothing: retrain on a changed
+    table and every row still said v1. Hashing the test-set probabilities means
+    the same model always carries the same version, wherever it was trained.
+    """
+    probabilities = pipeline.predict_proba(x_test)[:, 1].round(6)
+    return hashlib.sha1(probabilities.tobytes()).hexdigest()[:8]
+
+
+MODEL_DIR = "models"
+
+
+def model_path(root: Path, estimator: str) -> Path:
+    return Path(root) / MODEL_DIR / f"{estimator}.joblib"
+
+
+def save_model(trained: TrainedModel, path: Path) -> Path:
+    """The whole TrainedModel to one small file, 8KB for the logistic regression."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(trained, path)
+    return path
+
+
+def load_model(path: Path) -> TrainedModel | None:
+    """The saved model, or None when there is none or it will not load.
+
+    A pickle is tied to the scikit-learn that wrote it. Rather than crash the
+    app on a library upgrade, an unreadable file counts as a missing one and
+    the caller trains again.
+    """
+    path = Path(path)
+    if not path.exists():
+        return None
+    try:
+        loaded = joblib.load(path)
+    except Exception:  # noqa: BLE001 -- any unpickling failure means "retrain"
+        return None
+    return loaded if isinstance(loaded, TrainedModel) else None
 
 
 def feature_defaults(df: pd.DataFrame, spec: Spec) -> dict:
