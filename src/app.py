@@ -479,7 +479,6 @@ def rung_recommend(df: pd.DataFrame, spec: model_mod.Spec) -> None:
 # --------------------------------------------------------------------------
 # The loop -- a verdict on the recommendation, and the agent that learns from it
 # --------------------------------------------------------------------------
-WRITE_BATCH = 25
 OUTCOMES = {"unknown": "don't know yet", "stayed": "stayed", "left": "left"}
 
 
@@ -676,38 +675,21 @@ def rung_production(df: pd.DataFrame, spec: model_mod.Spec,
                     load: data_mod.LoadResult) -> None:
     st.subheader(SUBHEADS[3])
     st.caption(
-        "Three things happen here: a job writes the scores to a table, people "
-        "send verdicts on the recommendations, and a second agent rewrites the rules."
+        "A job scores the table and writes the riskiest rows down (the audit "
+        "trail at the bottom); people send verdicts on rung 3; a second agent "
+        "rewrites the rules from them."
     )
 
     conn = data_mod.get_connection()
     trained = get_model(df, spec)
     scored = model_mod.score_records(trained, df, spec, [])
     rules_set = rules_store.load_active(conn)
-    bands = agent_mod.Bands.from_rules(rules_set)
     source = "Supabase" if load.source == "supabase" else "the local CSV"
 
-    st.markdown("**1 · Write the scores**")
     st.caption(f"Model {trained.version} from {getattr(trained, 'origin', 'this process')} · "
                f"rules v{rules_set.version} · {len(scored):,} customers scored from {source}.")
-    target = "Supabase" if conn is not None else "the local predictions file"
-    if st.button(f"Score and write the {WRITE_BATCH} riskiest to {target}", type="primary"):
-        now = datetime.now(timezone.utc).isoformat()
-        rows = [
-            {
-                "record_id": str(row[spec.id_column]),
-                "probability": round(float(row["probability"]), 4),
-                "recommended_action": bands.recommend(row).action,
-                "model_version": f"{trained.version} · rules v{rules_set.version}",
-                "created_at": now,
-            }
-            for row in scored.head(WRITE_BATCH).to_dict("records")
-        ]
-        ok, message = data_mod.write_predictions(conn, rows)
-        (st.success if ok else st.error)(message)
 
-    st.divider()
-    st.markdown("**2 · Learn from what came back**")
+    st.markdown("**1 · Learn from what came back**")
     counts = data_mod.loop_counts(conn)
     st.caption(f"{counts['logged']:,} decisions logged · "
                f"{counts['verdicts']:,} verdicts from people on rung 3.")
@@ -715,7 +697,7 @@ def rung_production(df: pd.DataFrame, spec: model_mod.Spec,
     learner_panel(conn, rules_set, feedback)
 
     st.divider()
-    st.markdown("**3 · Who changed the rules, and when**")
+    st.markdown("**2 · Who changed the rules, and when**")
     versions = rules_store.history(conn, limit=5)
     if not versions:
         st.caption("No Supabase connection, so no history: the rules are ladder.toml's v1.")
@@ -733,7 +715,7 @@ def rung_production(df: pd.DataFrame, spec: model_mod.Spec,
     with st.expander("Audit trail -- the predictions table"):
         recent = data_mod.read_predictions(conn)
         if recent.empty:
-            st.info("Nothing written yet -- press the button above.")
+            st.info("Nothing written yet -- the job is: python ladder.py app")
         else:
             st.dataframe(recent, width="stretch", hide_index=True)
 
