@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-ORG_ID="${SUPABASE_ORG_ID:-REDACTED-ORG-ID}"   # Bonim Bina
+ORG_ID="${SUPABASE_ORG_ID:?set SUPABASE_ORG_ID to your Supabase organisation id}"
 REGION="${SUPABASE_REGION:-eu-central-1}"
 NAME="${SUPABASE_PROJECT_NAME:?SUPABASE_PROJECT_NAME is required}"
 CSV="${LADDER_CSV:?LADDER_CSV is required}"
