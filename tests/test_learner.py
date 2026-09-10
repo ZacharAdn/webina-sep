@@ -103,3 +103,16 @@ def test_propose_falls_back_to_rules_when_llm_is_absent(rules, monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     got = learner.propose(rules, [fb(0.7, "wrong", "stayed", "Call")] * 3)
     assert got.source == "learner:rules"
+
+
+def test_three_who_left_after_a_soft_call_lower_the_floor_of_the_band_above(rules):
+    """The mirror of the floor-rises rule: medium customers kept leaving, so
+    the high band must start lower and catch them."""
+    feedback = [fb(0.577, "wrong", "left") for _ in range(3)]
+    proposal = learner.propose_rules(rules, feedback)
+    floors = {b.name: b.min for b in proposal.bands}
+    assert proposal.changed
+    assert floors["high"] == pytest.approx(0.55)
+    assert floors["medium"] == pytest.approx(0.35)
+    assert "left" in proposal.rationale
+    assert proposal.changes == ["high: floor 60% -> 55%"]

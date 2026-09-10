@@ -125,31 +125,48 @@ def _diff(before: RuleSet, after: tuple[Band, ...]) -> list[str]:
 def propose_rules(rules: RuleSet, feedback: list[dict]) -> Proposal:
     """The deterministic learner. Reads the digest, moves what the evidence moves."""
     digested = digest(rules, feedback)
-    revised: list[Band] = []
+    floors = {b.name: b.min for b in rules.bands}
+    actions = {b.name: b.action for b in rules.bands}
     notes: list[str] = []
-    for band in rules.bands:
+    crossed = 0
+    for position, band in enumerate(rules.bands):       # highest floor first
         d = digested[band.name]
-        minimum, action = band.min, band.action
-        if d.total >= MIN_VERDICTS_TO_ACT and d.wrong_share >= WRONG_SHARE_TO_ACT:
-            top = d.better.most_common(1)
-            if top and top[0][0] != action:
-                action = top[0][0]
-                notes.append(
-                    f"{band.name}: {d.wrong} of {d.total} verdicts said wrong and "
-                    f"{top[0][1]} of them suggested '{action}'."
-                )
-            elif band.min > 0 and d.stayed > d.left:
-                minimum = min(round(band.min + FLOOR_STEP, 4), 0.95)
-                notes.append(
-                    f"{band.name}: {d.stayed} of {d.total} customers stayed after a "
-                    f"'{band.action}' call, so the floor rises to {minimum:.0%}."
-                )
-        revised.append(Band(band.name, minimum, action))
+        if d.total < MIN_VERDICTS_TO_ACT or d.wrong_share < WRONG_SHARE_TO_ACT:
+            continue
+        crossed += 1
+        top = d.better.most_common(1)
+        if top and top[0][0] != band.action:
+            actions[band.name] = top[0][0]
+            notes.append(
+                f"{band.name}: {d.wrong} of {d.total} verdicts said wrong and "
+                f"{top[0][1]} of them suggested '{actions[band.name]}'."
+            )
+        elif band.min > 0 and d.stayed > d.left:
+            floors[band.name] = min(round(band.min + FLOOR_STEP, 4), 0.95)
+            notes.append(
+                f"{band.name}: {d.stayed} of {d.total} customers stayed after a "
+                f"'{band.action}' call, so the floor rises to {floors[band.name]:.0%}."
+            )
+        elif position > 0 and d.left > d.stayed:
+            # The mirror rule: they left after the softer call, so the band
+            # above has to start lower and catch the next ones.
+            above = rules.bands[position - 1]
+            floors[above.name] = max(round(above.min - FLOOR_STEP, 4), band.min + FLOOR_STEP)
+            notes.append(
+                f"{band.name}: {d.left} of {d.total} customers left after a "
+                f"'{band.action}' call, so '{above.name}' now starts at "
+                f"{floors[above.name]:.0%} and catches them."
+            )
+    revised = [Band(b.name, floors[b.name], actions[b.name]) for b in rules.bands]
     bands = normalise([b.__dict__ for b in revised])
     changes = _diff(rules, bands)
+    total = sum(d.total for d in digested.values())
     rationale = " ".join(notes) if notes else (
-        f"{sum(d.total for d in digested.values())} verdicts read; no band crossed "
-        f"the threshold of {MIN_VERDICTS_TO_ACT} verdicts with half or more wrong."
+        f"{total} verdicts read; no band crossed the threshold of "
+        f"{MIN_VERDICTS_TO_ACT} verdicts with half or more wrong."
+        if not crossed else
+        f"{total} verdicts read; {crossed} band(s) crossed the threshold but the "
+        "verdicts point nowhere: no better action, and stayed and left in balance."
     )
     return Proposal(
         rules, bands, rationale, "learner:rules",
